@@ -317,3 +317,4 @@ mk_shards(NoNodes,Range,Shards) ->
     NodeName = list_to_atom("node-" ++ integer_to_list(NoNodes)),
     mk_shards(NoNodes-1,Range,
               [#shard{name=NodeName, node=NodeName, range=Range} | Shards]).
+
