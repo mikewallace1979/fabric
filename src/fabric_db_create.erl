@@ -29,14 +29,19 @@ go(DbName, Options) ->
         {_,Secs,_} = now(),
         Suffix = "." ++ integer_to_list(Secs),
         Shards = mem3:choose_shards(DbName, [{shard_suffix, Suffix}] ++ Options),
-        Doc = make_document(Shards, Suffix),
-        Workers = fabric_util:submit_jobs(Shards, create_db, [Doc]),
-        Acc0 = fabric_dict:init(Workers, nil),
-        case fabric_util:recv(Workers, #shard.ref, fun handle_message/3, Acc0) of
-        {ok, _} ->
-            ok;
-        Else ->
-            Else
+        case Shards of
+            database_already_exists ->
+                {error, database_already_exists};
+            _ ->
+                Doc = make_document(Shards, Suffix),
+                Workers = fabric_util:submit_jobs(Shards, create_db, [Doc]),
+                Acc0 = fabric_dict:init(Workers, nil),
+                case fabric_util:recv(Workers, #shard.ref, fun handle_message/3, Acc0) of
+                    {ok, _} ->
+                        ok;
+                    Else ->
+                        Else
+                end
         end;
     nomatch ->
         {error, illegal_database_name}
