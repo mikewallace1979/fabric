@@ -26,25 +26,25 @@
 go(DbName, Options) ->
     case re:run(DbName, ?DBNAME_REGEX, [{capture,none}]) of
     match ->
-        {_,Secs,_} = now(),
-        Suffix = "." ++ integer_to_list(Secs),
-        Shards = mem3:choose_shards(DbName, [{shard_suffix, Suffix}] ++ Options),
-        case Shards of
-            database_already_exists ->
-                {error, database_already_exists};
-            _ ->
-                Doc = make_document(Shards, Suffix),
-                Workers = fabric_util:submit_jobs(Shards, create_db, [Doc]),
-                Acc0 = fabric_dict:init(Workers, nil),
-                case fabric_util:recv(Workers, #shard.ref, fun handle_message/3, Acc0) of
-                    {ok, _} ->
-                        ok;
-                    Else ->
-                        Else
-                end
+        {MegaSecs,Secs,_} = now(),
+        Suffix = "." ++ integer_to_list(MegaSecs*1000000 + Secs),
+        {Shards, Doc}  =
+                case mem3:choose_shards(DbName, [{shard_suffix, Suffix}] ++ Options) of
+                    {existing, ExistingShards} ->
+                        {ExistingShards, mem3_util:open_db_doc(DbName)};
+                    {new, NewShards} ->
+                        {NewShards, make_document(NewShards, Suffix)}
+                end,
+        Workers = fabric_util:submit_jobs(Shards, create_db, [Doc]),
+        Acc0 = fabric_dict:init(Workers, nil),
+        case fabric_util:recv(Workers, #shard.ref, fun handle_message/3, Acc0) of
+            {ok, _} ->
+                ok;
+            Else ->
+                Else
         end;
     nomatch ->
-        {error, illegal_database_name}
+            {error, illegal_database_name}
     end.
 
 handle_message(Msg, Shard, Counters) ->
@@ -67,7 +67,6 @@ make_document([#shard{dbname=DbName}|_] = Shards, Suffix) ->
     end, {[], [], []}, Shards),
     #doc{id=DbName, body = {[
         {<<"shard_suffix">>, Suffix},
-        {<<"deleted">>,false},
         {<<"changelog">>, lists:sort(RawOut)},
         {<<"by_node">>, {[{K,lists:sort(V)} || {K,V} <- ByNodeOut]}},
         {<<"by_range">>, {[{K,lists:sort(V)} || {K,V} <- ByRangeOut]}}
