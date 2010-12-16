@@ -1,5 +1,5 @@
 % Copyright 2010 Cloudant
-% 
+%
 % Licensed under the Apache License, Version 2.0 (the "License"); you may not
 % use this file except in compliance with the License. You may obtain a copy of
 % the License at
@@ -214,7 +214,8 @@ collect_update_seqs(Seq, Shard, Counters) when is_integer(Seq) ->
     end.
 
 pack_seqs(Workers) ->
-    SeqList = [{N,R,S} || {#shard{node=N, range=R}, S} <- Workers],
+    SeqList = [{N,R,S,mem3:db_suffix(ShardName)} ||
+                  {#shard{name=ShardName, node=N, range=R}, S} <- Workers],
     SeqSum = lists:sum(element(2, lists:unzip(Workers))),
     Opaque = couch_util:encodeBase64Url(term_to_binary(SeqList, [compressed])),
     list_to_binary([integer_to_list(SeqSum), $-, Opaque]).
@@ -229,9 +230,9 @@ unpack_seqs(Packed, DbName) ->
     {match, [Opaque]} = re:run(Packed, "^([0-9]+-)?(?<opaque>.*)", [{capture,
         [opaque], binary}]),
     % TODO relies on internal structure of fabric_dict as keylist
-    lists:map(fun({Node, [A,B], Seq}) ->
+    lists:map(fun({Node, [A,B], Seq, Suffix}) ->
         Shard = #shard{node=Node, range=[A,B], dbname=DbName},
-        {mem3_util:name_shard(Shard), Seq}
+        {mem3_util:name_shard(Shard, Suffix), Seq}
     end, binary_to_term(couch_util:decodeBase64Url(Opaque))).
 
 start_update_notifiers(DbName) ->

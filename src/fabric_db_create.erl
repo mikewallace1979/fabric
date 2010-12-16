@@ -1,5 +1,5 @@
 % Copyright 2010 Cloudant
-% 
+%
 % Licensed under the Apache License, Version 2.0 (the "License"); you may not
 % use this file except in compliance with the License. You may obtain a copy of
 % the License at
@@ -26,8 +26,10 @@
 go(DbName, Options) ->
     case re:run(DbName, ?DBNAME_REGEX, [{capture,none}]) of
     match ->
-        Shards = mem3:choose_shards(DbName, Options),
-        Doc = make_document(Shards),
+        {_,Secs,_} = now(),
+        Suffix = "." ++ integer_to_list(Secs),
+        Shards = mem3:choose_shards(DbName, [{shard_suffix, Suffix}] ++ Options),
+        Doc = make_document(Shards, Suffix),
         Workers = fabric_util:submit_jobs(Shards, create_db, [Doc]),
         Acc0 = fabric_dict:init(Workers, nil),
         case fabric_util:recv(Workers, #shard.ref, fun handle_message/3, Acc0) of
@@ -49,7 +51,7 @@ handle_message(Msg, Shard, Counters) ->
         final_answer(C1)
     end.
 
-make_document([#shard{dbname=DbName}|_] = Shards) ->
+make_document([#shard{dbname=DbName}|_] = Shards, Suffix) ->
     {RawOut, ByNodeOut, ByRangeOut} =
     lists:foldl(fun(#shard{node=N, range=[B,E]}, {Raw, ByNode, ByRange}) ->
         Range = ?l2b([couch_util:to_hex(<<B:32/integer>>), "-",
@@ -59,6 +61,8 @@ make_document([#shard{dbname=DbName}|_] = Shards) ->
             orddict:append(Range, Node, ByRange)}
     end, {[], [], []}, Shards),
     #doc{id=DbName, body = {[
+        {<<"shard_suffix">>, Suffix},
+        {<<"deleted">>,false},
         {<<"changelog">>, lists:sort(RawOut)},
         {<<"by_node">>, {[{K,lists:sort(V)} || {K,V} <- ByNodeOut]}},
         {<<"by_range">>, {[{K,lists:sort(V)} || {K,V} <- ByRangeOut]}}
@@ -79,7 +83,7 @@ final_answer(Counters) ->
     end.
 
 db_create_ok_test() ->
-    Shards = mem3_util:create_partition_map("foo",3,12,["node1","node2","node3"]),
+    Shards = mem3_util:create_partition_map("foo",3,12,["node1","node2","node3"],"foo"),
     Acc0 = fabric_dict:init(Shards, nil),
     Result = lists:foldl(fun(Shard,{Acc,_}) ->
                         case handle_message(ok,Shard,Acc) of
@@ -91,7 +95,7 @@ db_create_ok_test() ->
     ?assertEqual(element(2,Result), true).
 
 db_create_file_exists_test() ->
-    Shards = mem3_util:create_partition_map("foo",3,12,["node1","node2","node3","node4","node5"]),
+    Shards = mem3_util:create_partition_map("foo",3,12,["node1","node2","node3","node4","node5"],"foo"),
     BadNo = random:uniform(length(Shards)),
     Acc0 = fabric_dict:init(Shards, nil),
     Result = lists:foldl(
