@@ -1,5 +1,5 @@
 % Copyright 2010 Cloudant
-% 
+%
 % Licensed under the Apache License, Version 2.0 (the "License"); you may not
 % use this file except in compliance with the License. You may obtain a copy of
 % the License at
@@ -27,6 +27,7 @@
     db,
     limit,
     include_docs,
+    doc_info = nil,
     offset = nil,
     total_rows,
     reduce_fun = fun couch_db:enum_docs_reduce_to_count/1,
@@ -249,11 +250,12 @@ with_db(DbName, Options, {M,F,A}) ->
 
 view_fold(#full_doc_info{} = FullDocInfo, OffsetReds, Acc) ->
     % matches for _all_docs and translates #full_doc_info{} -> KV pair
-    case couch_doc:to_doc_info(FullDocInfo) of
+    DocInfo = couch_doc:to_doc_info(FullDocInfo),
+    case DocInfo of
     #doc_info{revs=[#rev_info{deleted=false, rev=Rev}|_]} ->
         Id = FullDocInfo#full_doc_info.id,
         Value = {[{rev,couch_doc:rev_to_str(Rev)}]},
-        view_fold({{Id,Id}, Value}, OffsetReds, Acc);
+        view_fold({{Id,Id}, Value}, OffsetReds, Acc#view_acc{doc_info=DocInfo});
     #doc_info{revs=[#rev_info{deleted=true}|_]} ->
         {ok, Acc}
     end;
@@ -280,13 +282,25 @@ view_fold({{Key,Id}, Value}, _Offset, Acc) ->
         include_docs = IncludeDocs
     } = Acc,
     Doc = if not IncludeDocs -> undefined; true ->
-                  {Props} = Value,
                   % when keys are used and an <<"_id">> is in the value
                   % those docs are retrieved instead of row id in the view
                   % see fabric_view:possibly_embed_doc
-                  case couch_util:get_value(<<"_id">>,Props) of
-                      undefined ->
-                          case couch_db:open_doc(Db, Id, []) of
+                  SkipIncludeDoc = case is_tuple(Value) of
+                                       true ->
+                                           {Props} = Value,
+                                           couch_util:get_value(<<"_id">>,Props)
+                                               =/= undefined;
+                                       false -> false
+                                   end,
+                  case SkipIncludeDoc of
+                      false ->
+                          Resp = case Acc#view_acc.doc_info of
+                                 nil ->
+                                         couch_db:open_doc(Db, Id, []);
+                                 DocInfo ->
+                                     couch_db:open_doc_int(Db,DocInfo,[])
+                                 end,
+                          case Resp of
                               {not_found, deleted} ->
                                   null;
                               {not_found, missing} ->
@@ -294,7 +308,7 @@ view_fold({{Key,Id}, Value}, _Offset, Acc) ->
                               {ok, Doc0} ->
                                   couch_doc:to_json_obj(Doc0, [])
                           end;
-                      _ -> undefined
+                      true -> undefined
                   end
           end,
     case rexi:sync_reply(#view_row{key=Key, id=Id, value=Value, doc=Doc}) of
@@ -349,27 +363,27 @@ send(Key, Value, #view_acc{limit=Limit} = Acc) ->
 
 changes_enumerator(DocInfo, {Db, _Seq, Args}) ->
     #changes_args{include_docs=IncludeDocs, filter=Acc} = Args,
-    #doc_info{id=Id, high_seq=Seq, revs=[#rev_info{deleted=Del,rev=Rev}|_]}
+    #doc_info{id=Id, high_seq=Seq, revs=[#rev_info{deleted=Del}|_]}
         = DocInfo,
     case [X || X <- couch_changes:filter(DocInfo, Acc), X /= null] of
     [] ->
         {ok, {Db, Seq, Args}};
     Results ->
-        ChangesRow = changes_row(Db, Seq, Id, Results, Rev, Del, IncludeDocs),
+        ChangesRow = changes_row(Db, Seq, Id, Results, Del, IncludeDocs, DocInfo),
         Go = rexi:sync_reply(ChangesRow),
         {Go, {Db, Seq, Args}}
     end.
 
-changes_row(Db, Seq, Id, Results, Rev, Del, true) ->
-    #change{key=Seq, id=Id, value=Results, doc=doc_member(Db, Id, Rev), deleted=Del};
-changes_row(_, Seq, Id, Results, _, true, false) ->
+changes_row(Db, Seq, Id, Results, Del, true, DocInfo) ->
+    #change{key=Seq, id=Id, value=Results, doc=doc_member(Db, DocInfo), deleted=Del};
+changes_row(_, Seq, Id, Results, true, false, _) ->
     #change{key=Seq, id=Id, value=Results, deleted=true};
-changes_row(_, Seq, Id, Results, _, false, false) ->
+changes_row(_, Seq, Id, Results, false, false, _) ->
     #change{key=Seq, id=Id, value=Results}.
 
-doc_member(Shard, Id, Rev) ->
-    case couch_db:open_doc_revs(Shard, Id, [Rev], []) of
-    {ok, [{ok,Doc}]} ->
+doc_member(Shard, DocInfo) ->
+    case couch_db:open_doc_int(Shard, DocInfo, []) of
+    {ok, Doc} ->
         couch_doc:to_json_obj(Doc, []);
     Error ->
         Error
@@ -382,9 +396,9 @@ possible_ancestors(FullInfo, MissingRevs) ->
     LeafRevs = [Rev || #rev_info{rev=Rev} <- RevsInfo],
     % Find the revs that are possible parents of this rev
     lists:foldl(fun({LeafPos, LeafRevId}, Acc) ->
-        % this leaf is a "possible ancenstor" of the missing 
+        % this leaf is a "possible ancenstor" of the missing
         % revs if this LeafPos lessthan any of the missing revs
-        case lists:any(fun({MissingPos, _}) -> 
+        case lists:any(fun({MissingPos, _}) ->
                 LeafPos < MissingPos end, MissingRevs) of
         true ->
             [{LeafPos, LeafRevId} | Acc];
