@@ -1,5 +1,5 @@
 % Copyright 2010 Cloudant
-% 
+%
 % Licensed under the Apache License, Version 2.0 (the "License"); you may not
 % use this file except in compliance with the License. You may obtain a copy of
 % the License at
@@ -14,7 +14,8 @@
 
 -module(fabric_util).
 
--export([submit_jobs/3, cleanup/1, recv/4, get_db/1, remove_ancestors/2]).
+-export([submit_jobs/3, submit_job_nodes/3,
+         cleanup/1, recv/4, get_db/1, remove_ancestors/2]).
 
 -include("fabric.hrl").
 -include_lib("mem3/include/mem3.hrl").
@@ -26,6 +27,13 @@ submit_jobs(Shards, EndPoint, ExtraArgs) ->
         Ref = rexi:cast(Node, {fabric_rpc, EndPoint, [ShardName | ExtraArgs]}),
         Shard#shard{ref = Ref}
     end, Shards).
+
+submit_job_nodes(Nodes, EndPoint, ExtraArgs) ->
+    lists:map(fun(Node) ->
+        Ref = rexi:cast(Node, {fabric_rpc, EndPoint, ExtraArgs}),
+        {Ref}
+    end, Nodes).
+
 
 cleanup(Workers) ->
     [rexi:kill(Node, Ref) || #shard{node=Node, ref=Ref} <- Workers].

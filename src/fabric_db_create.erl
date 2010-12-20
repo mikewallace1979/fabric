@@ -35,11 +35,22 @@ go(DbName, Options) ->
                     {new, NewShards} ->
                         {NewShards, make_document(NewShards, Suffix)}
                 end,
-        Workers = fabric_util:submit_jobs(Shards, create_db, [Doc]),
+        Workers = fabric_util:submit_jobs(Shards, create_db, []),
         Acc0 = fabric_dict:init(Workers, nil),
         case fabric_util:recv(Workers, #shard.ref, fun handle_message/3, Acc0) of
             {ok, _} ->
-                ok;
+                %% create the shard_db docs, note that these must go across all the nodes
+                %% and not just those holding shards
+                Workers1 = fabric_util:submit_job_nodes(mem3:nodes(),
+                                                        create_shard_db_doc, [Doc]),
+                Acc1 = fabric_dict:init(Workers1, nil),
+                case fabric_util:recv(Workers1, 1, fun handle_message/3, Acc1)
+                of
+                    {ok, _} ->
+                        ok;
+                    Else ->
+                        Else
+                end;
             Else ->
                 Else
         end;
@@ -47,13 +58,19 @@ go(DbName, Options) ->
             {error, illegal_database_name}
     end.
 
-handle_message(Msg, Shard, Counters) ->
-    C1 = fabric_dict:store(Shard, Msg, Counters),
+handle_message(Msg, Worker, Counters) ->
+    C1 = fabric_dict:store(Worker, Msg, Counters),
     case fabric_dict:any(nil, C1) of
     true ->
         {ok, C1};
     false ->
-        final_answer(C1)
+        % worker could be shard or a node
+        case Worker of
+        #shard{} ->
+                final_answer(C1);
+        _Any ->
+                {stop, ok}
+        end
     end.
 
 make_document([#shard{dbname=DbName}|_] = Shards, Suffix) ->

@@ -17,7 +17,8 @@
 -export([get_db_info/1, get_doc_count/1, get_update_seq/1]).
 -export([open_doc/3, open_revs/4, get_missing_revs/2, update_docs/3]).
 -export([all_docs/2, changes/3, map_view/4, reduce_view/4, group_info/2]).
--export([create_db/2, delete_db/2, reset_validation_funs/1, set_security/3,
+-export([create_db/1, create_shard_db_doc/1,
+         delete_db/2, reset_validation_funs/1, set_security/3,
     set_revs_limit/3]).
 
 -include("fabric.hrl").
@@ -133,7 +134,7 @@ reduce_view(DbName, Group0, ViewName, QueryArgs) ->
     } = QueryArgs,
     GroupFun = group_rows_fun(GroupLevel),
     MinSeq = if Stale == ok -> 0; true -> couch_db:get_update_seq(Db) end,
-    {ok, Pid} = gen_server:call(couch_view, {get_group_server, DbName, Group0}),
+    {ok, Pid} = gen_server:call(couch_view, {get_group_server, DbName, Group0}, infinity),
     {ok, #group{views=Views, def_lang=Lang}} = couch_view_group:request_group(
         Pid, MinSeq),
     {NthRed, View} = fabric_view:extract_view(Pid, ViewName, Views, reduce),
@@ -154,14 +155,17 @@ reduce_view(DbName, Group0, ViewName, QueryArgs) ->
     end,
     rexi:reply(complete).
 
-create_db(DbName, Doc) ->
-    mem3_util:write_db_doc(Doc),
+create_db(DbName) ->
     rexi:reply(case couch_server:create(DbName, []) of
     {ok, _} ->
         ok;
     Error ->
         Error
     end).
+
+create_shard_db_doc(Doc) ->
+    mem3_util:write_db_doc(Doc),
+    rexi:reply(ok).
 
 delete_db(DbName, DocId) ->
     mem3_util:delete_db_doc(DocId),
