@@ -1,5 +1,5 @@
 % Copyright 2010 Cloudant
-% 
+%
 % Licensed under the Apache License, Version 2.0 (the "License"); you may not
 % use this file except in compliance with the License. You may obtain a copy of
 % the License at
@@ -38,6 +38,8 @@ go(DbName, #view_query_args{keys=nil} = QueryArgs, Callback, Acc0) ->
         State, infinity, 5000) of
     {ok, NewState} ->
         {ok, NewState#collector.user_acc};
+    {timeout, NewState} ->
+            Callback({error, timeout}, NewState#collector.user_acc);
     {error, Resp} ->
         {ok, Resp}
     after
