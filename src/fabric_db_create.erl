@@ -26,14 +26,12 @@
 go(DbName, Options) ->
     case re:run(DbName, ?DBNAME_REGEX, [{capture,none}]) of
     match ->
-        {MegaSecs,Secs,_} = now(),
-        Suffix = "." ++ integer_to_list(MegaSecs*1000000 + Secs),
         {Shards, Doc}  =
-                case mem3:choose_shards(DbName, [{shard_suffix, Suffix}] ++ Options) of
+                case mem3:choose_shards(DbName, Options) of
                     {existing, ExistingShards} ->
                         {ExistingShards, mem3_util:open_db_doc(DbName)};
                     {new, NewShards} ->
-                        {NewShards, make_document(NewShards, Suffix)}
+                        {NewShards, make_document(NewShards)}
                 end,
         Workers = fabric_util:submit_jobs(Shards, create_db, []),
         Acc0 = fabric_dict:init(Workers, nil),
@@ -73,7 +71,7 @@ handle_message(Msg, Worker, Counters) ->
         end
     end.
 
-make_document([#shard{dbname=DbName}|_] = Shards, Suffix) ->
+make_document([#shard{name=Name, dbname=DbName}|_] = Shards) ->
     {RawOut, ByNodeOut, ByRangeOut} =
     lists:foldl(fun(#shard{node=N, range=[B,E]}, {Raw, ByNode, ByRange}) ->
         Range = ?l2b([couch_util:to_hex(<<B:32/integer>>), "-",
@@ -83,7 +81,7 @@ make_document([#shard{dbname=DbName}|_] = Shards, Suffix) ->
             orddict:append(Range, Node, ByRange)}
     end, {[], [], []}, Shards),
     #doc{id=DbName, body = {[
-        {<<"shard_suffix">>, Suffix},
+        {<<"shard_suffix">>, mem3:db_suffix(Name)},
         {<<"changelog">>, lists:sort(RawOut)},
         {<<"by_node">>, {[{K,lists:sort(V)} || {K,V} <- ByNodeOut]}},
         {<<"by_range">>, {[{K,lists:sort(V)} || {K,V} <- ByRangeOut]}}
