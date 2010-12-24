@@ -34,14 +34,16 @@ go(DbName, Options) ->
                         {NewShards, make_document(NewShards)}
                 end,
         Workers = fabric_util:submit_jobs(Shards, create_db, []),
-        Acc0 = fabric_dict:init(Workers, nil),
-        case fabric_util:recv(Workers, #shard.ref, fun handle_message/3, Acc0) of
+        W = couch_util:get_value(w, Options, couch_config:get("cluster","w","2")),
+        Acc0 = {length(Workers), list_to_integer(W), fabric_dict:init(Workers, nil)},
+        case fabric_util:recv(Workers, #shard.ref, fun handle_message_quorum/3, Acc0) of
             {ok, _} ->
                 %% create the shard_db docs, note that these must go across all the nodes
                 %% and not just those holding shards
                 Workers1 = fabric_util:submit_job_nodes(mem3:nodes(),
                                                         create_shard_db_doc, [Doc]),
-                Acc1 = fabric_dict:init(Workers1, nil),
+                Majority = (length(Workers1) div 2) + 1,
+                Acc1 = {length(Workers1), Majority, Workers1, fabric_dict:init(Workers1, nil)},
                 case fabric_util:recv(Workers1, 1, fun handle_message/3, Acc1)
                 of
                     {ok, _} ->
@@ -56,20 +58,78 @@ go(DbName, Options) ->
             {error, illegal_database_name}
     end.
 
-handle_message(Msg, Worker, Counters) ->
+handle_message_quorum(Msg, Worker, Acc0) ->
+    {WaitingCount, W, Counters} = Acc0,
     C1 = fabric_dict:store(Worker, Msg, Counters),
-    case fabric_dict:any(nil, C1) of
-    true ->
-        {ok, C1};
-    false ->
-        % worker could be shard or a node
-        case Worker of
-        #shard{} ->
-                final_answer(C1);
-        _Any ->
-                {stop, ok}
-        end
+    case WaitingCount of
+        1 ->
+            % we're done regardless of W, finish up
+            final_answer(C1);
+        _ ->
+            case quorum_met(W, C1) of
+                true ->
+                    final_answer(C1);
+                false ->
+                    {ok, {WaitingCount-1,W,C1}}
+            end
     end.
+
+quorum_met(W,C1) ->
+    CompletedNodes = completed_nodes(C1, shard_nodes(C1)),
+    length(CompletedNodes) >= W.
+
+shard_nodes(Counters) ->
+    lists:foldl(fun({#shard{node=Node},_},Acc) ->
+                        case lists:member(Node,Acc) of
+                            true ->
+                                Acc;
+                            false ->
+                                [Node | Acc]
+                        end
+                end,[],Counters).
+
+completed_nodes(Counters,Nodes) ->
+    lists:foldl(fun(Node,Acc) ->
+                        case lists:all(fun({#shard{node=NodeS},M}) ->
+                                               case NodeS == Node of
+                                                   true ->
+                                                       M =/= nil;
+                                                   false ->
+                                                       true
+                                               end
+                                       end,Counters) of
+                            true ->
+                                [Node | Acc];
+                            false ->
+                                Acc
+                        end
+                end,[],Nodes).
+
+handle_message(Msg, Worker, Acc) ->
+    {WaitingCount, Majority, Workers, Counters} = Acc,
+    Node = couch_util:get_value(Worker,Workers),
+    C1 = fabric_dict:store({Worker,Node}, Msg, Counters),
+    case WaitingCount of
+        1 ->
+            {stop, ok};
+        _ ->
+            case completed_counters(C1) >= Majority of
+                true ->
+                    {stop, ok};
+                false ->
+                    {ok, {WaitingCount-1, Majority, Workers, C1}}
+            end
+    end.
+
+completed_counters(Counters) ->
+    length(lists:foldl(fun({_,M},Acc) ->
+                               case M =/= nil of
+                                   true ->
+                                       [M | Acc];
+                                   false ->
+                                       Acc
+                               end
+                       end,[],Counters)).
 
 make_document([#shard{name=Name, dbname=DbName}|_] = Shards) ->
     {RawOut, ByNodeOut, ByRangeOut} =

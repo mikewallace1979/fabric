@@ -31,7 +31,7 @@ submit_jobs(Shards, EndPoint, ExtraArgs) ->
 submit_job_nodes(Nodes, EndPoint, ExtraArgs) ->
     lists:map(fun(Node) ->
         Ref = rexi:cast(Node, {fabric_rpc, EndPoint, ExtraArgs}),
-        {Ref}
+        {Ref, Node}
     end, Nodes).
 
 
