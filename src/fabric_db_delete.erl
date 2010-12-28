@@ -22,30 +22,96 @@
 %%      to be consistent with fabric_db_create for possible future use
 %% @see couch_server:delete_db
 %%
-go(DbName, _Options) ->
-    Shards = mem3:shards(DbName),
-    Workers = fabric_util:submit_jobs(Shards, delete_db, [DbName]),
-    Acc0 = fabric_dict:init(Workers, nil),
-    case fabric_util:recv(Workers, #shard.ref, fun handle_message/3, Acc0) of
-    {ok, ok} ->
-        ok;
-    {ok, not_found} ->
-        erlang:error(database_does_not_exist);
-    Error ->
-        Error
+go(DbName, Options) ->
+    DbDoc = mem3_util:open_db_doc(DbName),
+    % delete shard_db DbDoc first before deleting shards
+    case update_shard_db(DbDoc) of
+        {ok, _} ->
+            Shards = mem3:shards(DbName),
+            Workers = fabric_util:submit_jobs(Shards, delete_db, []),
+            W = couch_util:get_value(w, Options, couch_config:get("cluster","w","2")),
+            Acc0 = {length(Workers), list_to_integer(W), fabric_dict:init(Workers, nil)},
+            case fabric_util:recv(Workers, #shard.ref, fun handle_delete_db/3, Acc0) of
+                {ok, ok} ->
+                    ok;
+                {ok, not_found} ->
+                    erlang:error(database_does_not_exist);
+                Error ->
+                    Error
+            end;
+        Else ->
+            Else
     end.
 
-handle_message({rexi_EXIT, Reason}, _Worker, _Counters) ->
-    {error, Reason};
+update_shard_db(Doc) ->
+    Shards = [#shard{node=N} || N <- mem3:nodes()],
+    Workers = fabric_util:submit_jobs(Shards,delete_shard_db_doc, [Doc]),
+    Majority = (length(Workers) div 2) + 1,
+    Acc = {length(Workers), Majority, fabric_dict:init(Workers, nil)},
+    fabric_util:recv(Workers, #shard.ref, fun handle_update_shard_db/3, Acc).
 
-handle_message(Msg, Shard, Counters) ->
-    C1 = fabric_dict:store(Shard, Msg, Counters),
-    case fabric_dict:any(nil, C1) of
-    true ->
-        {ok, C1};
-    false ->
-        final_answer(C1)
+handle_delete_db(Msg, Worker, Acc0) ->
+    {WaitingCount, W, Counters} = Acc0,
+    C1 = fabric_dict:store(Worker, Msg, Counters),
+    case WaitingCount of
+        1 ->
+            % we're done regardless of W, finish up
+            final_answer(C1);
+        _ ->
+            case quorum_met(W, C1) of
+                true ->
+                    final_answer(C1);
+                false ->
+                    {ok, {WaitingCount-1,W,C1}}
+            end
     end.
+
+quorum_met(W,C1) ->
+    CompletedNodes = completed_nodes(C1, fabric_util:shard_nodes(C1)),
+    length(CompletedNodes) >= W.
+
+
+completed_nodes(Counters,Nodes) ->
+    lists:foldl(fun(Node,Acc) ->
+                        case lists:all(fun({#shard{node=NodeS},M}) ->
+                                               case NodeS == Node of
+                                                   true ->
+                                                       M =/= nil;
+                                                   false ->
+                                                       true
+                                               end
+                                       end,Counters) of
+                            true ->
+                                [Node | Acc];
+                            false ->
+                                Acc
+                        end
+                end,[],Nodes).
+
+handle_update_shard_db(Msg, Worker, Acc) ->
+    {WaitingCount, Majority, Counters} = Acc,
+    C1 = fabric_dict:store(Worker, Msg, Counters),
+    case WaitingCount of
+        1 ->
+            {stop, ok};
+        _ ->
+            case completed_counters(C1) >= Majority of
+                true ->
+                    {stop, ok};
+                false ->
+                    {ok, {WaitingCount-1, Majority, C1}}
+            end
+    end.
+
+completed_counters(Counters) ->
+    length(lists:foldl(fun({_,M},Acc) ->
+                               case M =/= nil of
+                                   true ->
+                                       [M | Acc];
+                                   false ->
+                                       Acc
+                               end
+                       end,[],Counters)).
 
 final_answer(Counters) ->
     Successes = [X || {_, M} = X <- Counters, M == ok orelse M == not_found],

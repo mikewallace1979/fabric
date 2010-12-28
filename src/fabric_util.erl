@@ -14,7 +14,8 @@
 
 -module(fabric_util).
 
--export([submit_jobs/3, cleanup/1, recv/4, get_db/1, remove_ancestors/2]).
+-export([submit_jobs/3, cleanup/1, recv/4, get_db/1,
+         shard_nodes/1, remove_ancestors/2]).
 
 -include("fabric.hrl").
 -include_lib("mem3/include/mem3.hrl").
@@ -48,6 +49,19 @@ get_db(DbName) ->
         % but don't require them
         rpc:call(Node, couch_db, open, [ShardName, []])
     end.
+
+%% collects all the unique nodes present in a collection of counters,
+%% which are pairs of `{#shard{},term()}'
+shard_nodes(Counters) ->
+    lists:foldl(fun({#shard{node=Node},_},Acc) ->
+                        case lists:member(Node,Acc) of
+                            true ->
+                                Acc;
+                            false ->
+                                [Node | Acc]
+                        end
+                end,[],Counters).
+
 
 % this presumes the incoming list is sorted, i.e. shorter revlists come first
 remove_ancestors([], Acc) ->

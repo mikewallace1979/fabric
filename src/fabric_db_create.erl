@@ -79,18 +79,8 @@ handle_create_db(Msg, Worker, Acc0) ->
     end.
 
 quorum_met(W,C1) ->
-    CompletedNodes = completed_nodes(C1, shard_nodes(C1)),
+    CompletedNodes = completed_nodes(C1, fabric_util:shard_nodes(C1)),
     length(CompletedNodes) >= W.
-
-shard_nodes(Counters) ->
-    lists:foldl(fun({#shard{node=Node},_},Acc) ->
-                        case lists:member(Node,Acc) of
-                            true ->
-                                Acc;
-                            false ->
-                                [Node | Acc]
-                        end
-                end,[],Counters).
 
 completed_nodes(Counters,Nodes) ->
     lists:foldl(fun(Node,Acc) ->
