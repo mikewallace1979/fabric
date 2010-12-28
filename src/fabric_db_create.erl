@@ -55,9 +55,11 @@ go(DbName, Options) ->
     end.
 
 update_shard_db(Doc) ->
-    Shards = [#shard{node=N} || N <- mem3:nodes()],
+    AllNodes = erlang:nodes([this, visible]),
+    Shards = [#shard{node=N} || N <- mem3:nodes(), lists:member(N,AllNodes)],
     Workers = fabric_util:submit_jobs(Shards,create_shard_db_doc, [Doc]),
-    Majority = (length(Workers) div 2) + 1,
+    %Majority = (length(Workers) div 2) + 1,
+    Majority = length(Workers),
     Acc = {length(Workers), Majority, fabric_dict:init(Workers, nil)},
     fabric_util:recv(Workers, #shard.ref, fun handle_update_shard_db/3, Acc).
 
