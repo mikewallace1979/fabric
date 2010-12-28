@@ -38,14 +38,10 @@ go(DbName, Options) ->
         Acc0 = {length(Workers), list_to_integer(W), fabric_dict:init(Workers, nil)},
         case fabric_util:recv(Workers, #shard.ref, fun handle_message_quorum/3, Acc0) of
             {ok, _} ->
-                %% create the shard_db docs, note that these must go across all the nodes
+                %% shards were created ok,
+                %% now update shard_db, note that these must go across all the nodes
                 %% and not just those holding shards
-                Workers1 = fabric_util:submit_job_nodes(mem3:nodes(),
-                                                        create_shard_db_doc, [Doc]),
-                Majority = (length(Workers1) div 2) + 1,
-                Acc1 = {length(Workers1), Majority, Workers1, fabric_dict:init(Workers1, nil)},
-                case fabric_util:recv(Workers1, 1, fun handle_message/3, Acc1)
-                of
+                case update_shard_db(Doc) of
                     {ok, _} ->
                         ok;
                     Else ->
@@ -57,6 +53,14 @@ go(DbName, Options) ->
     nomatch ->
             {error, illegal_database_name}
     end.
+
+update_shard_db(Doc) ->
+    Shards = [#shard{node=N} || N <- mem3:nodes()],
+    Workers = fabric_util:submit_jobs(Shards,create_shard_db_doc, [Doc]),
+    Majority = (length(Workers) div 2) + 1,
+    Acc = {length(Workers), Majority, fabric_dict:init(Workers, nil)},
+    fabric_util:recv(Workers, #shard.ref, fun handle_message/3, Acc).
+
 
 handle_message_quorum(Msg, Worker, Acc0) ->
     {WaitingCount, W, Counters} = Acc0,
@@ -106,9 +110,8 @@ completed_nodes(Counters,Nodes) ->
                 end,[],Nodes).
 
 handle_message(Msg, Worker, Acc) ->
-    {WaitingCount, Majority, Workers, Counters} = Acc,
-    Node = couch_util:get_value(Worker,Workers),
-    C1 = fabric_dict:store({Worker,Node}, Msg, Counters),
+    {WaitingCount, Majority, Counters} = Acc,
+    C1 = fabric_dict:store(Worker, Msg, Counters),
     case WaitingCount of
         1 ->
             {stop, ok};
@@ -117,7 +120,7 @@ handle_message(Msg, Worker, Acc) ->
                 true ->
                     {stop, ok};
                 false ->
-                    {ok, {WaitingCount-1, Majority, Workers, C1}}
+                    {ok, {WaitingCount-1, Majority, C1}}
             end
     end.
 
