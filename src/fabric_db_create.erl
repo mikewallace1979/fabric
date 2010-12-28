@@ -166,7 +166,7 @@ final_answer(Counters) ->
 
 db_create_ok_test() ->
     Shards = mem3_util:create_partition_map("foo",3,12,["node1","node2","node3"],"foo"),
-    Acc0 = fabric_dict:init(Shards, nil),
+    Acc0 = {36, 3, fabric_dict:init(Shards, nil)},
     Result = lists:foldl(fun(Shard,{Acc,_}) ->
                         case handle_create_db(ok,Shard,Acc) of
                             {ok, NewAcc} ->
@@ -179,7 +179,7 @@ db_create_ok_test() ->
 db_create_file_exists_test() ->
     Shards = mem3_util:create_partition_map("foo",3,12,["node1","node2","node3","node4","node5"],"foo"),
     BadNo = random:uniform(length(Shards)),
-    Acc0 = fabric_dict:init(Shards, nil),
+    Acc0 = {36, 5, fabric_dict:init(Shards, nil)},
     Result = lists:foldl(
                fun(Shard,{Acc,Iter,Bool}) ->
                        MessResult = case Iter of
