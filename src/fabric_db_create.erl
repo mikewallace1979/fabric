@@ -36,7 +36,7 @@ go(DbName, Options) ->
         Workers = fabric_util:submit_jobs(Shards, create_db, []),
         W = couch_util:get_value(w, Options, couch_config:get("cluster","w","2")),
         Acc0 = {length(Workers), list_to_integer(W), fabric_dict:init(Workers, nil)},
-        case fabric_util:recv(Workers, #shard.ref, fun handle_message_quorum/3, Acc0) of
+        case fabric_util:recv(Workers, #shard.ref, fun handle_create_db/3, Acc0) of
             {ok, _} ->
                 %% shards were created ok,
                 %% now update shard_db, note that these must go across all the nodes
@@ -59,10 +59,10 @@ update_shard_db(Doc) ->
     Workers = fabric_util:submit_jobs(Shards,create_shard_db_doc, [Doc]),
     Majority = (length(Workers) div 2) + 1,
     Acc = {length(Workers), Majority, fabric_dict:init(Workers, nil)},
-    fabric_util:recv(Workers, #shard.ref, fun handle_message/3, Acc).
+    fabric_util:recv(Workers, #shard.ref, fun handle_update_shard_db/3, Acc).
 
 
-handle_message_quorum(Msg, Worker, Acc0) ->
+handle_create_db(Msg, Worker, Acc0) ->
     {WaitingCount, W, Counters} = Acc0,
     C1 = fabric_dict:store(Worker, Msg, Counters),
     case WaitingCount of
@@ -109,7 +109,7 @@ completed_nodes(Counters,Nodes) ->
                         end
                 end,[],Nodes).
 
-handle_message(Msg, Worker, Acc) ->
+handle_update_shard_db(Msg, Worker, Acc) ->
     {WaitingCount, Majority, Counters} = Acc,
     C1 = fabric_dict:store(Worker, Msg, Counters),
     case WaitingCount of
@@ -168,7 +168,7 @@ db_create_ok_test() ->
     Shards = mem3_util:create_partition_map("foo",3,12,["node1","node2","node3"],"foo"),
     Acc0 = fabric_dict:init(Shards, nil),
     Result = lists:foldl(fun(Shard,{Acc,_}) ->
-                        case handle_message(ok,Shard,Acc) of
+                        case handle_create_db(ok,Shard,Acc) of
                             {ok, NewAcc} ->
                                 {NewAcc,true};
                             {stop, ok} -> {Acc,true};
@@ -184,9 +184,9 @@ db_create_file_exists_test() ->
                fun(Shard,{Acc,Iter,Bool}) ->
                        MessResult = case Iter of
                                         BadNo ->
-                                            handle_message(file_exists,Shard,Acc);
+                                            handle_create_db(file_exists,Shard,Acc);
                                         _ ->
-                                            handle_message(ok,Shard,Acc)
+                                            handle_create_db(ok,Shard,Acc)
                                     end,
                        case MessResult of
                            {ok, NewAcc} ->
