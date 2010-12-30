@@ -26,21 +26,21 @@ go(DbName, Options) ->
     DbDoc = mem3_util:open_db_doc(DbName),
     % delete shard_db DbDoc first before deleting shards
     case update_shard_db(DbDoc) of
-        {ok, _} ->
-            Shards = mem3:shards(DbName),
-            Workers = fabric_util:submit_jobs(Shards, delete_db, []),
-            W = couch_util:get_value(w, Options, couch_config:get("cluster","w","2")),
-            Acc0 = {length(Workers), list_to_integer(W), fabric_dict:init(Workers, nil)},
-            case fabric_util:recv(Workers, #shard.ref, fun handle_delete_db/3, Acc0) of
-                {ok, ok} ->
-                    ok;
-                {ok, not_found} ->
-                    erlang:error(database_does_not_exist);
-                Error ->
-                    Error
-            end;
-        Else ->
-            Else
+    {ok, _} ->
+        Shards = mem3:shards(DbName),
+        Workers = fabric_util:submit_jobs(Shards, delete_db, []),
+        W = couch_util:get_value(w, Options, couch_config:get("cluster","w","2")),
+        Acc0 = {length(Workers), list_to_integer(W), fabric_dict:init(Workers, nil)},
+        case fabric_util:recv(Workers, #shard.ref, fun handle_delete_db/3, Acc0) of
+        {ok, ok} ->
+            ok;
+        {ok, not_found} ->
+            erlang:error(database_does_not_exist);
+        Error ->
+            Error
+        end;
+    Else ->
+        Else
     end.
 
 update_shard_db(Doc) ->
@@ -56,16 +56,16 @@ handle_delete_db(Msg, Worker, Acc0) ->
     {WaitingCount, W, Counters} = Acc0,
     C1 = fabric_dict:store(Worker, Msg, Counters),
     case WaitingCount of
-        1 ->
-            % we're done regardless of W, finish up
+    1 ->
+        % we're done regardless of W, finish up
+        final_answer(C1);
+    _ ->
+        case quorum_met(W, C1) of
+        true ->
             final_answer(C1);
-        _ ->
-            case quorum_met(W, C1) of
-                true ->
-                    final_answer(C1);
-                false ->
-                    {ok, {WaitingCount-1,W,C1}}
-            end
+        false ->
+            {ok, {WaitingCount-1,W,C1}}
+        end
     end.
 
 quorum_met(W,C1) ->
@@ -77,16 +77,16 @@ completed_nodes(Counters,Nodes) ->
     lists:foldl(fun(Node,Acc) ->
                         case lists:all(fun({#shard{node=NodeS},M}) ->
                                                case NodeS == Node of
-                                                   true ->
-                                                       M =/= nil;
-                                                   false ->
-                                                       true
+                                               true ->
+                                                   M =/= nil;
+                                               false ->
+                                                   true
                                                end
                                        end,Counters) of
-                            true ->
-                                [Node | Acc];
-                            false ->
-                                Acc
+                        true ->
+                            [Node | Acc];
+                        false ->
+                            Acc
                         end
                 end,[],Nodes).
 
@@ -94,24 +94,24 @@ handle_update_shard_db(Msg, Worker, Acc) ->
     {WaitingCount, Majority, Counters} = Acc,
     C1 = fabric_dict:store(Worker, Msg, Counters),
     case WaitingCount of
-        1 ->
+    1 ->
+        {stop, ok};
+    _ ->
+        case completed_counters(C1) >= Majority of
+        true ->
             {stop, ok};
-        _ ->
-            case completed_counters(C1) >= Majority of
-                true ->
-                    {stop, ok};
-                false ->
-                    {ok, {WaitingCount-1, Majority, C1}}
-            end
+        false ->
+            {ok, {WaitingCount-1, Majority, C1}}
+        end
     end.
 
 completed_counters(Counters) ->
     length(lists:foldl(fun({_,M},Acc) ->
                                case M =/= nil of
-                                   true ->
-                                       [M | Acc];
-                                   false ->
-                                       Acc
+                               true ->
+                                   [M | Acc];
+                               false ->
+                                   Acc
                                end
                        end,[],Counters)).
 

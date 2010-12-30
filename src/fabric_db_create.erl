@@ -28,10 +28,10 @@ go(DbName, Options) ->
     match ->
         {Shards, Doc}  =
                 case mem3:choose_shards(DbName, Options) of
-                    {existing, ExistingShards} ->
+                {existing, ExistingShards} ->
                         {ExistingShards, mem3_util:open_db_doc(DbName)};
-                    {new, NewShards} ->
-                        {NewShards, make_document(NewShards)}
+                {new, NewShards} ->
+                    {NewShards, make_document(NewShards)}
                 end,
         Workers = fabric_util:submit_jobs(Shards, create_db, []),
         W = couch_util:get_value(w, Options, couch_config:get("cluster","w","2")),
@@ -42,10 +42,10 @@ go(DbName, Options) ->
                 %% now update shard_db, note that these must go across all the nodes
                 %% and not just those holding shards
                 case update_shard_db(Doc) of
-                    {ok, _} ->
-                        ok;
-                    Else ->
-                        Else
+                {ok, _} ->
+                    ok;
+                Else ->
+                    Else
                 end;
             Else ->
                 Else
@@ -68,16 +68,16 @@ handle_create_db(Msg, Worker, Acc0) ->
     {WaitingCount, W, Counters} = Acc0,
     C1 = fabric_dict:store(Worker, Msg, Counters),
     case WaitingCount of
-        1 ->
-            % we're done regardless of W, finish up
+    1 ->
+        % we're done regardless of W, finish up
+        final_answer(C1);
+    _ ->
+        case quorum_met(W, C1) of
+        true ->
             final_answer(C1);
-        _ ->
-            case quorum_met(W, C1) of
-                true ->
-                    final_answer(C1);
-                false ->
-                    {ok, {WaitingCount-1,W,C1}}
-            end
+        false ->
+            {ok, {WaitingCount-1,W,C1}}
+        end
     end.
 
 quorum_met(W,C1) ->
@@ -88,16 +88,16 @@ completed_nodes(Counters,Nodes) ->
     lists:foldl(fun(Node,Acc) ->
                         case lists:all(fun({#shard{node=NodeS},M}) ->
                                                case NodeS == Node of
-                                                   true ->
-                                                       M =/= nil;
-                                                   false ->
-                                                       true
+                                               true ->
+                                                   M =/= nil;
+                                               false ->
+                                                   true
                                                end
                                        end,Counters) of
-                            true ->
-                                [Node | Acc];
-                            false ->
-                                Acc
+                        true ->
+                            [Node | Acc];
+                        false ->
+                            Acc
                         end
                 end,[],Nodes).
 
@@ -105,24 +105,24 @@ handle_update_shard_db(Msg, Worker, Acc) ->
     {WaitingCount, Majority, Counters} = Acc,
     C1 = fabric_dict:store(Worker, Msg, Counters),
     case WaitingCount of
-        1 ->
+    1 ->
+        {stop, ok};
+    _ ->
+        case completed_counters(C1) >= Majority of
+        true ->
             {stop, ok};
-        _ ->
-            case completed_counters(C1) >= Majority of
-                true ->
-                    {stop, ok};
-                false ->
-                    {ok, {WaitingCount-1, Majority, C1}}
-            end
+        false ->
+            {ok, {WaitingCount-1, Majority, C1}}
+        end
     end.
 
 completed_counters(Counters) ->
     length(lists:foldl(fun({_,M},Acc) ->
                                case M =/= nil of
-                                   true ->
-                                       [M | Acc];
-                                   false ->
-                                       Acc
+                               true ->
+                                   [M | Acc];
+                               false ->
+                                   Acc
                                end
                        end,[],Counters)).
 
@@ -161,10 +161,10 @@ db_create_ok_test() ->
     Acc0 = {36, 3, fabric_dict:init(Shards, nil)},
     Result = lists:foldl(fun(Shard,{Acc,_}) ->
                         case handle_create_db(ok,Shard,Acc) of
-                            {ok, NewAcc} ->
-                                {NewAcc,true};
-                            {stop, ok} -> {Acc,true};
-                            {error, _} -> {Acc, false}
+                        {ok, NewAcc} ->
+                            {NewAcc,true};
+                        {stop, ok} -> {Acc,true};
+                        {error, _} -> {Acc, false}
                         end end, {Acc0, true}, Shards),
     ?assertEqual(element(2,Result), true).
 
@@ -175,16 +175,16 @@ db_create_file_exists_test() ->
     Result = lists:foldl(
                fun(Shard,{Acc,Iter,Bool}) ->
                        MessResult = case Iter of
-                                        BadNo ->
-                                            handle_create_db(file_exists,Shard,Acc);
-                                        _ ->
-                                            handle_create_db(ok,Shard,Acc)
+                                    BadNo ->
+                                        handle_create_db(file_exists,Shard,Acc);
+                                    _ ->
+                                        handle_create_db(ok,Shard,Acc)
                                     end,
                        case MessResult of
-                           {ok, NewAcc} ->
-                               {NewAcc, Iter+1, Bool};
-                           {stop, ok} -> {Acc, Iter+1, Bool};
-                           {error, _} -> {Acc, Iter+1, false}
+                       {ok, NewAcc} ->
+                           {NewAcc, Iter+1, Bool};
+                       {stop, ok} -> {Acc, Iter+1, Bool};
+                       {error, _} -> {Acc, Iter+1, false}
                        end
                end,{Acc0, 1, true}, Shards),
     ?assertEqual(element(3,Result),false).
