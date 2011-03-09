@@ -180,8 +180,8 @@ execute_update_docs(Db, Docs) ->
     [#doc{id=Id} | _] = Docs,
         Ctx = #user_ctx{roles=[<<"_admin">>]},
         Res = fabric:update_docs(Db, Docs, [replicated_changes, {user_ctx,Ctx}]),
-        ?LOG_INFO("read_repair ~s ~s ~p", [Db, Id, Res]).
-
+        twig:log(info, "read_repair ~s ~s ~p", [Db, Id, Res])
+    end).
 
 % hackery required so that not_found sorts first
 strip_not_found_missing([]) ->
