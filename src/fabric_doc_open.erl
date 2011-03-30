@@ -25,29 +25,37 @@ go(DbName, Id, Options) ->
         [Id, [deleted|Options]]),
     SuppressDeletedDoc = not lists:member(deleted, Options),
     R = couch_util:get_value(r, Options, couch_config:get("cluster","r","2")),
+    BlockingRepair = couch_config:get("cluster","blocking_repair",false),
     RepairOpts = [{r, integer_to_list(mem3:n(DbName))} | Options],
     Acc0 = {Workers, list_to_integer(R), []},
     case fabric_util:recv(Workers, #shard.ref, fun handle_message/3, Acc0) of
     {ok, Reply} ->
         format_reply(Reply, SuppressDeletedDoc);
     {error, needs_repair, Reply} ->
-        spawn(fabric, open_revs, [DbName, Id, all, RepairOpts]),
-        format_reply(Reply, SuppressDeletedDoc);
+        if BlockingRepair ->
+            run_sync_repair(DbName, Id, RepairOpts, SuppressDeletedDoc);
+           true ->
+            spawn(fabric, open_revs, [DbName, Id, all, RepairOpts]),
+            format_reply(Reply, SuppressDeletedDoc)
+        end;
     {error, needs_repair} ->
         % we couldn't determine the correct reply, so we'll run a sync repair
-        {ok, Results} = fabric:open_revs(DbName, Id, all, RepairOpts),
-        case lists:partition(fun({ok, #doc{deleted=Del}}) -> Del end, Results) of
-        {[], []} ->
-            {not_found, missing};
-        {_DeletedDocs, []} when SuppressDeletedDoc ->
-            {not_found, deleted};
-        {DeletedDocs, []} ->
-            lists:last(lists:sort(DeletedDocs));
-        {_, LiveDocs} ->
-            lists:last(lists:sort(LiveDocs))
-        end;
+        run_sync_repair(DbName, Id, RepairOpts, SuppressDeletedDoc);
     Error ->
         Error
+    end.
+
+run_sync_repair(DbName, Id, RepairOpts, SuppressDeletedDoc) ->
+    {ok, Results} = fabric:open_revs(DbName, Id, all, RepairOpts),
+    case lists:partition(fun({ok, #doc{deleted=Del}}) -> Del end, Results) of
+    {[], []} ->
+        {not_found, missing};
+    {_DeletedDocs, []} when SuppressDeletedDoc ->
+        {not_found, deleted};
+    {DeletedDocs, []} ->
+        lists:last(lists:sort(DeletedDocs));
+    {_, LiveDocs} ->
+        lists:last(lists:sort(LiveDocs))
     end.
 
 format_reply({ok, #doc{deleted=true}}, true) ->
