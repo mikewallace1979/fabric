@@ -165,12 +165,23 @@ is_repair_needed(_, _) ->
 maybe_execute_read_repair(_Db, false) ->
     ok;
 maybe_execute_read_repair(Db, Docs) ->
-    spawn(fun() ->
-        [#doc{id=Id} | _] = Docs,
+    BlockingRepair = list_to_atom(couch_config:get("cluster",
+                                                   "blocking_repair",
+                                                   "false")),
+    if BlockingRepair ->
+        execute_update_docs(Db, Docs);
+       true ->
+        spawn(fun() ->
+                  execute_update_docs(Db, Docs)
+              end)
+    end.
+
+execute_update_docs(Db, Docs) ->
+    [#doc{id=Id} | _] = Docs,
         Ctx = #user_ctx{roles=[<<"_admin">>]},
         Res = fabric:update_docs(Db, Docs, [replicated_changes, {user_ctx,Ctx}]),
-        ?LOG_INFO("read_repair ~s ~s ~p", [Db, Id, Res])
-    end).
+        ?LOG_INFO("read_repair ~s ~s ~p", [Db, Id, Res]).
+
 
 % hackery required so that not_found sorts first
 strip_not_found_missing([]) ->

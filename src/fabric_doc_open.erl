@@ -25,7 +25,9 @@ go(DbName, Id, Options) ->
         [Id, [deleted|Options]]),
     SuppressDeletedDoc = not lists:member(deleted, Options),
     R = couch_util:get_value(r, Options, couch_config:get("cluster","r","2")),
-    BlockingRepair = couch_config:get("cluster","blocking_repair",false),
+    BlockingRepair = list_to_atom(couch_config:get("cluster",
+                                                   "blocking_repair",
+                                                   "false")),
     RepairOpts = [{r, integer_to_list(mem3:n(DbName))} | Options],
     Acc0 = {Workers, list_to_integer(R), []},
     case fabric_util:recv(Workers, #shard.ref, fun handle_message/3, Acc0) of
