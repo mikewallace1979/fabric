@@ -59,24 +59,29 @@ handle_message({rexi_DOWN, _, _, _}, Worker, Acc0) ->
     skip_message(Worker, Acc0);
 handle_message({rexi_EXIT, _Reason}, Worker, Acc0) ->
     skip_message(Worker, Acc0);
-handle_message(Reply, Worker, {Workers, R, Replies}) ->
-    NewReplies = fabric_util:update_counter(Reply, 1, Replies),
-    Reduced = fabric_util:remove_ancestors(NewReplies, []),
-    case lists:dropwhile(fun({_,{_, Count}}) -> Count < R end, Reduced) of
-    [{_,{QuorumReply, _}} | _] ->
-        fabric_util:cleanup(lists:delete(Worker,Workers)),
-        if length(NewReplies) =:= 1 ->
-            {stop, QuorumReply};
-        true ->
-            % we had some disagreement amongst the workers, so repair is useful
-            {error, needs_repair, QuorumReply}
+handle_message(Reply, Worker, {Workers, R, Replies}=Acc0) ->
+    GoodReply = fabric_util:is_valid(Reply),
+    if (GoodReply) ->
+        NewReplies = fabric_util:update_counter(Reply, 1, Replies),
+        Reduced = fabric_util:remove_ancestors(NewReplies, []),
+        case lists:dropwhile(fun({_,{_, Count}}) -> Count < R end, Reduced) of
+        [{_,{QuorumReply, _}} | _] ->
+            fabric_util:cleanup(lists:delete(Worker,Workers)),
+            if length(NewReplies) =:= 1 ->
+                {stop, QuorumReply};
+               true ->
+                % we had some disagreement amongst the workers, so repair is useful
+                {error, needs_repair, QuorumReply}
+            end;
+        [] ->
+            if length(Workers) =:= 1 ->
+                {error, needs_repair};
+               true ->
+                {ok, {lists:delete(Worker,Workers), R, NewReplies}}
+            end
         end;
-    [] ->
-        if length(Workers) =:= 1 ->
-            {error, needs_repair};
-        true ->
-            {ok, {lists:delete(Worker,Workers), R, NewReplies}}
-        end
+       true ->
+        skip_message(Worker, Acc0)
     end.
 
 skip_message(_Worker, {Workers, _R, _Replies}) when length(Workers) =:= 1 ->
@@ -90,11 +95,16 @@ open_doc_test() ->
     Foo2 = {ok, #doc{revs = {2,[<<"foo2">>,<<"foo">>]}}},
     Bar1 = {ok, #doc{revs = {1,[<<"bar">>]}}},
     Baz1 = {ok, #doc{revs = {1,[<<"baz">>]}}},
+    Bad = {ok, bad},
     NF = {not_found, missing},
     State0 = {[nil, nil, nil], 2, []},
+    StateBad = {[nil, nil], 2, []},
     State1 = {[nil, nil], 2, [fabric_util:kv(Foo1,1)]},
     State2 = {[nil], 2, [fabric_util:kv(Bar1,1), fabric_util:kv(Foo1,1)]},
+
     ?assertEqual({ok, State1}, handle_message(Foo1, nil, State0)),
+
+    ?assertEqual({ok, StateBad}, handle_message(Bad, nil, State0)),
 
     % normal case - quorum reached, no disagreement
     ?assertEqual({stop, Foo1}, handle_message(Foo1, nil, State1)),
