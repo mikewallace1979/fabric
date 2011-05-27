@@ -26,28 +26,33 @@ go(DbName, Id, Options) ->
     SuppressDeletedDoc = not lists:member(deleted, Options),
     R = couch_util:get_value(r, Options, couch_config:get("cluster","r","2")),
     RepairOpts = [{r, integer_to_list(mem3:n(DbName))} | Options],
+    RexiMon = fabric_util:create_monitors(Workers),
     Acc0 = {Workers, list_to_integer(R), []},
-    case fabric_util:recv(Workers, #shard.ref, fun handle_message/3, Acc0) of
-    {ok, Reply} ->
-        format_reply(Reply, SuppressDeletedDoc);
-    {error, needs_repair, Reply} ->
-        spawn(fabric, open_revs, [DbName, Id, all, RepairOpts]),
-        format_reply(Reply, SuppressDeletedDoc);
-    {error, needs_repair} ->
-        % we couldn't determine the correct reply, so we'll run a sync repair
-        {ok, Results} = fabric:open_revs(DbName, Id, all, RepairOpts),
-        case lists:partition(fun({ok, #doc{deleted=Del}}) -> Del end, Results) of
-        {[], []} ->
-            {not_found, missing};
-        {_DeletedDocs, []} when SuppressDeletedDoc ->
-            {not_found, deleted};
-        {DeletedDocs, []} ->
-            lists:last(lists:sort(DeletedDocs));
-        {_, LiveDocs} ->
-            lists:last(lists:sort(LiveDocs))
-        end;
-    Error ->
-        Error
+    try
+        case fabric_util:recv(Workers, #shard.ref, fun handle_message/3, Acc0) of
+        {ok, Reply} ->
+            format_reply(Reply, SuppressDeletedDoc);
+        {error, needs_repair, Reply} ->
+            spawn(fabric, open_revs, [DbName, Id, all, RepairOpts]),
+            format_reply(Reply, SuppressDeletedDoc);
+        {error, needs_repair} ->
+                                                % we couldn't determine the correct reply, so we'll run a sync repair
+            {ok, Results} = fabric:open_revs(DbName, Id, all, RepairOpts),
+            case lists:partition(fun({ok, #doc{deleted=Del}}) -> Del end, Results) of
+            {[], []} ->
+                {not_found, missing};
+            {_DeletedDocs, []} when SuppressDeletedDoc ->
+                {not_found, deleted};
+            {DeletedDocs, []} ->
+                lists:last(lists:sort(DeletedDocs));
+            {_, LiveDocs} ->
+                lists:last(lists:sort(LiveDocs))
+            end;
+        Error ->
+            Error
+        end
+    after
+        rexi_monitor:stop(RexiMon)
     end.
 
 format_reply({ok, #doc{deleted=true}}, true) ->
@@ -55,8 +60,12 @@ format_reply({ok, #doc{deleted=true}}, true) ->
 format_reply(Else, _) ->
     Else.
 
-handle_message({rexi_DOWN, _, _, _}, Worker, Acc0) ->
-    skip_message(Worker, Acc0);
+handle_message({rexi_DOWN, _, {_,NodeRef},_}, _Worker, {Workers, R, Replies}) ->
+    NewWorkers =
+        fabric_dict:filter(fun(#shard{node=Node}, _) ->
+                                Node =/= NodeRef
+                       end, Workers),
+    {ok, {NewWorkers, R, Replies}};
 handle_message({rexi_EXIT, _Reason}, Worker, Acc0) ->
     skip_message(Worker, Acc0);
 handle_message(Reply, Worker, {Workers, R, Replies}) ->
