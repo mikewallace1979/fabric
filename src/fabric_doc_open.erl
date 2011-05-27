@@ -29,22 +29,27 @@ go(DbName, Id, Options) ->
                                                    "blocking_repair",
                                                    "false")),
     RepairOpts = [{r, integer_to_list(mem3:n(DbName))} | Options],
+    RexiMon = fabric_util:create_monitors(Workers),
     Acc0 = {Workers, list_to_integer(R), []},
-    case fabric_util:recv(Workers, #shard.ref, fun handle_message/3, Acc0) of
-    {ok, Reply} ->
-        format_reply(Reply, SuppressDeletedDoc);
-    {error, needs_repair, Reply} ->
-        if BlockingRepair ->
+    try
+        case fabric_util:recv(Workers, #shard.ref, fun handle_message/3, Acc0) of
+        {ok, Reply} ->
+            format_reply(Reply, SuppressDeletedDoc);
+        {error, needs_repair, Reply} ->
+            if BlockingRepair ->
+                run_sync_repair(DbName, Id, RepairOpts, SuppressDeletedDoc);
+               true ->
+                spawn(fabric, open_revs, [DbName, Id, all, RepairOpts]),
+                format_reply(Reply, SuppressDeletedDoc)
+            end;
+        {error, needs_repair} ->
+            % we couldn't determine the correct reply, so we'll run a sync repair
             run_sync_repair(DbName, Id, RepairOpts, SuppressDeletedDoc);
-           true ->
-            spawn(fabric, open_revs, [DbName, Id, all, RepairOpts]),
-            format_reply(Reply, SuppressDeletedDoc)
-        end;
-    {error, needs_repair} ->
-        % we couldn't determine the correct reply, so we'll run a sync repair
-        run_sync_repair(DbName, Id, RepairOpts, SuppressDeletedDoc);
-    Error ->
-        Error
+        Error ->
+            Error
+        end,
+    after
+        rexi_monitor:stop(RexiMon)
     end.
 
 run_sync_repair(DbName, Id, RepairOpts, SuppressDeletedDoc) ->
@@ -65,8 +70,12 @@ format_reply({ok, #doc{deleted=true}}, true) ->
 format_reply(Else, _) ->
     Else.
 
-handle_message({rexi_DOWN, _, _, _}, Worker, Acc0) ->
-    skip_message(Worker, Acc0);
+handle_message({rexi_DOWN, _, {_,NodeRef},_}, _Worker, {Workers, R, Replies}) ->
+    NewWorkers =
+        fabric_dict:filter(fun(#shard{node=Node}, _) ->
+                                Node =/= NodeRef
+                       end, Workers),
+    {ok, {NewWorkers, R, Replies}};
 handle_message({rexi_EXIT, _Reason}, Worker, Acc0) ->
     skip_message(Worker, Acc0);
 handle_message(Reply, Worker, {Workers, R, Replies}=Acc0) ->
