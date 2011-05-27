@@ -38,10 +38,19 @@ go(DbName, Options) ->
         end,
         Workers = fabric_util:submit_jobs(Shards, create_db, []),
         Acc0 = fabric_dict:init(Workers, nil),
-        X = fabric_util:recv(Workers, #shard.ref, fun handle_message/3, Acc0),
+
+        W = list_to_integer(couch_util:get_value(w,Options,"2")),
+
+        % create references to monitor
+        RexiMon = create_monitors(Shards),
+
+        X = fabric_util:recv(Workers, #shard.ref, fun handle_message/3, {length(Workers), W, Acc0}),
+
+        rexi_monitor:stop(RexiMon),
+
         case update_shard_db(Doc) of
         {ok, true} ->
-            case X of {ok, _} -> ok; Else -> Else end;
+            case X of {ok, ok} -> ok; {ok, part_ok} -> part_ok end;
         {ok, false} ->
             {error, internal_server_error}
         end;
@@ -49,21 +58,32 @@ go(DbName, Options) ->
         {error, illegal_database_name}
     end.
 
-handle_message(Msg, Shard, Counters) ->
+handle_message({rexi_DOWN, _, {_,NodeRef},_}, _Shard, {WorkerLen, W, Counters}) ->
+    NewCounters =
+        fabric_dict:filter(fun(#shard{node=Node}, _) ->
+                                Node =/= NodeRef
+                       end, Counters),
+    {ok, {WorkerLen - (fabric_dict:size(Counters) - fabric_dict:size(NewCounters)),
+          W, NewCounters}};
+
+handle_message(Msg, Shard, {WorkerLen, W, Counters}) ->
     C1 = fabric_dict:store(Shard, Msg, Counters),
-    case fabric_dict:any(nil, C1) of
-    true ->
-        {ok, C1};
-    false ->
-        final_answer(C1)
-    end.
+    maybe_answer(WorkerLen-1, W, C1).
 
 update_shard_db(Doc) ->
     Shards = [#shard{node=N} || N <- mem3:nodes()],
+    RexiMon = create_monitors(Shards),
     Workers = fabric_util:submit_jobs(Shards, create_shard_db_doc, [Doc]),
     Acc0 = fabric_dict:init(Workers, nil),
-    fabric_util:recv(Workers, #shard.ref, fun handle_db_update/3, Acc0).
+    Response = fabric_util:recv(Workers, #shard.ref, fun handle_db_update/3, Acc0),
+    rexi_monitor:stop(RexiMon),
+    Response.
 
+handle_db_update({rexi_DOWN, _, {_,NodeRef},_}, _Worker, Counters) ->
+    {ok,
+     fabric_dict:filter(fun(#shard{node=Node}, _) ->
+                                Node =/= NodeRef
+                            end, Counters)};
 handle_db_update({ok, _}, Worker, Counters) ->
     handle_db_update(ok, Worker, Counters);
 handle_db_update(Msg, Worker, Counters) ->
@@ -91,19 +111,44 @@ make_document([#shard{dbname=DbName}|_] = Shards, Suffix) ->
         {<<"by_range">>, {[{K,lists:sort(V)} || {K,V} <- ByRangeOut]}}
     ]}}.
 
-final_answer(Counters) ->
-    Successes = [X || {_, M} = X <- Counters, M == ok orelse M == file_exists],
-    case fabric_view:is_progress_possible(Successes) of
+maybe_answer(WorkerLen, W, Counters) ->
+    case fabric_view:is_progress_possible(Counters) of
     true ->
-        case lists:keymember(file_exists, 2, Successes) of
+        case lists:keymember(file_exists, 2, Counters) of
         true ->
             {error, file_exists};
         false ->
-            {stop, ok}
+            QuorumMet = quorum_met(W, Counters),
+            case QuorumMet of
+            true ->
+                {stop, ok};
+            false ->
+                if WorkerLen > 0 ->
+                    {ok, {WorkerLen, W, Counters}};
+                   true ->
+                    {stop, part_ok}
+                end
+            end
         end;
     false ->
         {error, internal_server_error}
     end.
+
+quorum_met(W, Replies) ->
+    Counters = lists:foldl(fun({#shard{name=Name},M},D) ->
+                               if M == ok ->
+                                   orddict:update_counter(Name,1,D);
+                                  true ->
+                                   D
+                               end end, orddict:new(), Replies),
+    lists:all(fun({_,Count}) -> Count >= W end,Counters).
+
+
+create_monitors(Shards) ->
+    MonRefs = lists:map(fun(#shard{node=Node}) ->
+                            {rexi_server, Node}
+                        end, Shards),
+    rexi_monitor:start(MonRefs).
 
 db_create_ok_test() ->
     Shards = mem3_util:create_partition_map("foo",3,12,["node1","node2","node3"]),
