@@ -42,7 +42,7 @@ go(DbName, Options) ->
         W = list_to_integer(couch_util:get_value(w,Options,"2")),
 
         % create references to monitor
-        RexiMon = create_monitors(Shards),
+        RexiMon = fabric_util:create_monitors(Shards),
 
         X = fabric_util:recv(Workers, #shard.ref, fun handle_message/3, {length(Workers), W, Acc0}),
 
@@ -72,7 +72,7 @@ handle_message(Msg, Shard, {WorkerLen, W, Counters}) ->
 
 update_shard_db(Doc) ->
     Shards = [#shard{node=N} || N <- mem3:nodes()],
-    RexiMon = create_monitors(Shards),
+    RexiMon = fabric_util:create_monitors(Shards),
     Workers = fabric_util:submit_jobs(Shards, create_shard_db_doc, [Doc]),
     Acc0 = fabric_dict:init(Workers, nil),
     Response = fabric_util:recv(Workers, #shard.ref, fun handle_db_update/3, Acc0),
@@ -143,12 +143,6 @@ quorum_met(W, Replies) ->
                                end end, orddict:new(), Replies),
     lists:all(fun({_,Count}) -> Count >= W end,Counters).
 
-
-create_monitors(Shards) ->
-    MonRefs = lists:map(fun(#shard{node=Node}) ->
-                            {rexi_server, Node}
-                        end, Shards),
-    rexi_monitor:start(MonRefs).
 
 db_create_ok_test() ->
     Shards = mem3_util:create_partition_map("foo",3,12,["node1","node2","node3"]),
