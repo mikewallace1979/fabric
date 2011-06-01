@@ -118,7 +118,7 @@ maybe_answer(WorkerLen, W, Counters) ->
         true ->
             {error, file_exists};
         false ->
-            QuorumMet = quorum_met(W, Counters),
+            QuorumMet = fabric_util:quorum_met(W, Counters),
             case QuorumMet of
             true ->
                 {stop, ok};
@@ -133,16 +133,6 @@ maybe_answer(WorkerLen, W, Counters) ->
     false ->
         {error, internal_server_error}
     end.
-
-quorum_met(W, Replies) ->
-    Counters = lists:foldl(fun({#shard{name=Name},M},D) ->
-                               if M == ok ->
-                                   orddict:update_counter(Name,1,D);
-                                  true ->
-                                   D
-                               end end, orddict:new(), Replies),
-    lists:all(fun({_,Count}) -> Count >= W end,Counters).
-
 
 db_create_ok_test() ->
     Shards = mem3_util:create_partition_map("foo",3,12,["node1","node2","node3"]),
