@@ -50,7 +50,10 @@ go(DbName, Options) ->
 
         case update_shard_db(Doc) of
         {ok, true} ->
-            case X of {ok, ok} -> ok; {ok, part_ok} -> part_ok end;
+            case X of {ok, ok} -> ok;
+            {ok, part_ok} -> part_ok;
+            Else -> Else
+            end;
         {ok, false} ->
             {error, internal_server_error}
         end;
