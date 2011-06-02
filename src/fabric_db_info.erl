@@ -22,10 +22,21 @@
 go(DbName) ->
     Shards = mem3:shards(DbName),
     Workers = fabric_util:submit_jobs(Shards, get_db_info, []),
-    Acc0 = {fabric_dict:init(Workers, nil), []},
-    fabric_util:recv(Workers, #shard.ref, fun handle_message/3, Acc0).
+    RexiMon = fabric_util:create_monitors(Shards),
+    Acc0 = {length(Workers), fabric_dict:init(Workers, nil), []},
+    X = fabric_util:recv(Workers, #shard.ref, fun handle_message/3, Acc0),
+    rexi_monitor:stop(RexiMon),
+    X.
 
-handle_message({ok, Info}, #shard{dbname=Name} = Shard, {Counters, Acc}) ->
+handle_message({rexi_DOWN, _, {_,NodeRef},_}, _Shard, {WorkerLen, Counters, Acc}) ->
+    NewCounters =
+        fabric_dict:filter(fun(#shard{node=Node}, _) ->
+                                Node =/= NodeRef
+                       end, Counters),
+    {ok, {WorkerLen - (fabric_dict:size(Counters) - fabric_dict:size(NewCounters)),
+          NewCounters, Acc}};
+
+handle_message({ok, Info}, #shard{dbname=Name} = Shard, {WorkerLen, Counters, Acc}) ->
     case fabric_dict:lookup_element(Shard, Counters) of
     undefined ->
         % already heard from someone else in this range
@@ -34,9 +45,10 @@ handle_message({ok, Info}, #shard{dbname=Name} = Shard, {Counters, Acc}) ->
         Seq = couch_util:get_value(update_seq, Info),
         C1 = fabric_dict:store(Shard, Seq, Counters),
         C2 = fabric_view:remove_overlapping_shards(Shard, C1),
-        case fabric_dict:any(nil, C2) of
+        NewWorkerLen = WorkerLen - (fabric_dict:size(C1) - fabric_dict:size(C2)),
+        case fabric_dict:any(nil, C2) andalso (NewWorkerLen > 0) of
         true ->
-            {ok, {C2, [Info|Acc]}};
+            {ok, {NewWorkerLen, C2, [Info|Acc]}};
         false ->
             {stop, [
                 {db_name,Name},
