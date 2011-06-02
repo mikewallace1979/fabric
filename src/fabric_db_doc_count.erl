@@ -46,13 +46,9 @@ handle_message({ok, Count}, Shard, {WorkerLen, Counters, Acc}) ->
         C1 = fabric_dict:store(Shard, ok, Counters),
         C2 = fabric_view:remove_overlapping_shards(Shard, C1),
         NewWorkerLen = WorkerLen - (fabric_dict:size(C1) - fabric_dict:size(C2)),
-        case fabric_dict:any(nil, C2) of
+        case fabric_dict:any(nil, C2) andalso (NewWorkerLen > 0) of
         true ->
-            if NewWorkerLen > 0 ->
-                {ok, {NewWorkerLen, C2, Count+Acc}};
-               true ->
-                {stop, Count+Acc}
-            end;
+            {ok, {NewWorkerLen, C2, Count+Acc}};
         false ->
             {stop, Count+Acc}
         end
