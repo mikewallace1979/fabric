@@ -26,7 +26,9 @@ go(DbName, Id, Options) ->
     SuppressDeletedDoc = not lists:member(deleted, Options),
     R = couch_util:get_value(r, Options, couch_config:get("cluster","r","2")),
     RepairOpts = [{r, integer_to_list(mem3:n(DbName))} | Options],
+    RexiMon = fabric_util:create_monitors(Workers),
     Acc0 = {Workers, list_to_integer(R), []},
+    X =
     case fabric_util:recv(Workers, #shard.ref, fun handle_message/3, Acc0) of
     {ok, Reply} ->
         format_reply(Reply, SuppressDeletedDoc);
@@ -48,15 +50,21 @@ go(DbName, Id, Options) ->
         end;
     Error ->
         Error
-    end.
+    end,
+    rexi_monitor:stop(RexiMon),
+    X.
 
 format_reply({ok, #doc{deleted=true}}, true) ->
     {not_found, deleted};
 format_reply(Else, _) ->
     Else.
 
-handle_message({rexi_DOWN, _, _, _}, Worker, Acc0) ->
-    skip_message(Worker, Acc0);
+handle_message({rexi_DOWN, _, {_,NodeRef},_}, _Worker, {Workers, R, Replies}) ->
+    NewWorkers =
+        fabric_dict:filter(fun(#shard{node=Node}, _) ->
+                                Node =/= NodeRef
+                       end, Workers),
+    {ok, {NewWorkers, R, Replies}};
 handle_message({rexi_EXIT, _Reason}, Worker, Acc0) ->
     skip_message(Worker, Acc0);
 handle_message(Reply, Worker, {Workers, R, Replies}) ->
