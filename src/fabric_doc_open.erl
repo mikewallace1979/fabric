@@ -28,31 +28,32 @@ go(DbName, Id, Options) ->
     RepairOpts = [{r, integer_to_list(mem3:n(DbName))} | Options],
     RexiMon = fabric_util:create_monitors(Workers),
     Acc0 = {Workers, list_to_integer(R), []},
-    X =
-    case fabric_util:recv(Workers, #shard.ref, fun handle_message/3, Acc0) of
-    {ok, Reply} ->
-        format_reply(Reply, SuppressDeletedDoc);
-    {error, needs_repair, Reply} ->
-        spawn(fabric, open_revs, [DbName, Id, all, RepairOpts]),
-        format_reply(Reply, SuppressDeletedDoc);
-    {error, needs_repair} ->
-        % we couldn't determine the correct reply, so we'll run a sync repair
-        {ok, Results} = fabric:open_revs(DbName, Id, all, RepairOpts),
-        case lists:partition(fun({ok, #doc{deleted=Del}}) -> Del end, Results) of
-        {[], []} ->
-            {not_found, missing};
-        {_DeletedDocs, []} when SuppressDeletedDoc ->
-            {not_found, deleted};
-        {DeletedDocs, []} ->
-            lists:last(lists:sort(DeletedDocs));
-        {_, LiveDocs} ->
-            lists:last(lists:sort(LiveDocs))
-        end;
-    Error ->
-        Error
-    end,
-    rexi_monitor:stop(RexiMon),
-    X.
+    try
+        case fabric_util:recv(Workers, #shard.ref, fun handle_message/3, Acc0) of
+        {ok, Reply} ->
+            format_reply(Reply, SuppressDeletedDoc);
+        {error, needs_repair, Reply} ->
+            spawn(fabric, open_revs, [DbName, Id, all, RepairOpts]),
+            format_reply(Reply, SuppressDeletedDoc);
+        {error, needs_repair} ->
+                                                % we couldn't determine the correct reply, so we'll run a sync repair
+            {ok, Results} = fabric:open_revs(DbName, Id, all, RepairOpts),
+            case lists:partition(fun({ok, #doc{deleted=Del}}) -> Del end, Results) of
+            {[], []} ->
+                {not_found, missing};
+            {_DeletedDocs, []} when SuppressDeletedDoc ->
+                {not_found, deleted};
+            {DeletedDocs, []} ->
+                lists:last(lists:sort(DeletedDocs));
+            {_, LiveDocs} ->
+                lists:last(lists:sort(LiveDocs))
+            end;
+        Error ->
+            Error
+        end
+    after
+        rexi_monitor:stop(RexiMon)
+    end.
 
 format_reply({ok, #doc{deleted=true}}, true) ->
     {not_found, deleted};
