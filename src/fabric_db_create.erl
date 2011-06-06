@@ -78,9 +78,11 @@ update_shard_db(Doc) ->
     RexiMon = fabric_util:create_monitors(Shards),
     Workers = fabric_util:submit_jobs(Shards, create_shard_db_doc, [Doc]),
     Acc0 = fabric_dict:init(Workers, nil),
-    Response = fabric_util:recv(Workers, #shard.ref, fun handle_db_update/3, Acc0),
-    rexi_monitor:stop(RexiMon),
-    Response.
+    try
+        fabric_util:recv(Workers, #shard.ref, fun handle_db_update/3, Acc0)
+    after
+        rexi_monitor:stop(RexiMon)
+    end.
 
 handle_db_update({rexi_DOWN, _, {_,NodeRef},_}, _Worker, Counters) ->
     {ok,
