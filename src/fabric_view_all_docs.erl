@@ -76,7 +76,7 @@ handle_message({rexi_DOWN, _, {_, NodeRef}, _}, _, State) ->
                        end, Counters),
     {ok, State#collector{counters=NewCounters}};
 
-handle_message({rexi_EXIT, Reason}, {Worker, _From}, State) ->
+handle_message({rexi_EXIT, Reason}, Worker, State) ->
     #collector{callback=Callback, counters=Counters0, user_acc=Acc} = State,
     Counters = fabric_dict:erase(Worker, Counters0),
     case fabric_view:is_progress_possible(Counters) of
