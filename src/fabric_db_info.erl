@@ -24,9 +24,11 @@ go(DbName) ->
     Workers = fabric_util:submit_jobs(Shards, get_db_info, []),
     RexiMon = fabric_util:create_monitors(Shards),
     Acc0 = {length(Workers), fabric_dict:init(Workers, nil), []},
-    X = fabric_util:recv(Workers, #shard.ref, fun handle_message/3, Acc0),
-    rexi_monitor:stop(RexiMon),
-    X.
+    try
+        fabric_util:recv(Workers, #shard.ref, fun handle_message/3, Acc0)
+    after
+        rexi_monitor:stop(RexiMon)
+    end.
 
 handle_message({rexi_DOWN, _, {_,NodeRef},_}, _Shard, {WorkerLen, Counters, Acc}) ->
     NewCounters =
