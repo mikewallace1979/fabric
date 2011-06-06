@@ -46,17 +46,18 @@ go(DbName, Id, Revs, Options) ->
         replies = case Revs of all -> []; Revs -> [{Rev,[]} || Rev <- Revs] end
     },
     RexiMon = fabric_util:create_monitors(Workers),
-    X =
-        case fabric_util:recv(Workers, #shard.ref, fun handle_message/3, State) of
+    try
+        fabric_util:recv(Workers, #shard.ref, fun handle_message/3, State) of
         {ok, {ok, Reply}} ->
             {ok, Reply};
         Else ->
             Else
-        end,
-    rexi_monitor:stop(RexiMon),
-    X.
 
-handle_message({rexi_DOWN, _, {_,NodeRef},_}, Worker, #state{workers=Workers}=State) ->
+    after
+        rexi_monitor:stop(RexiMon)
+    end.
+
+handle_message({rexi_DOWN, _, {_,NodeRef},_}, _Worker, #state{workers=Workers}=State) ->
     NewWorkers =
         fabric_dict:filter(fun(#shard{node=Node}, _) ->
                                 Node =/= NodeRef
