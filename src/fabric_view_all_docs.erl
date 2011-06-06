@@ -68,7 +68,7 @@ go(DbName, QueryArgs, Callback, Acc0) ->
         Callback(timeout, Acc0)
     end.
 
-handle_message({rexi_DOWN, _, {_, NodeRef}, _}, nil, State) ->
+handle_message({rexi_DOWN, _, {_, NodeRef}, _}, _, State) ->
     #collector{counters = Counters} = State,
     NewCounters =
         fabric_dict:filter(fun(#shard{node=Node}, _) ->
@@ -76,7 +76,7 @@ handle_message({rexi_DOWN, _, {_, NodeRef}, _}, nil, State) ->
                        end, Counters),
     {ok, State#collector{counters=NewCounters}};
 
-handle_message({rexi_EXIT, Reason}, Worker, State) ->
+handle_message({rexi_EXIT, Reason}, {Worker, _From}, State) ->
     #collector{callback=Callback, counters=Counters0, user_acc=Acc} = State,
     Counters = fabric_dict:erase(Worker, Counters0),
     case fabric_view:is_progress_possible(Counters) of
