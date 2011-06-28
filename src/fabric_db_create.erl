@@ -71,6 +71,8 @@ validate_dbname(DbName, Options) ->
             ok;
         nomatch when DbName =:= <<"_users">> ->
             ok;
+        nomatch when DbName =:= <<"_replicator">> ->
+            ok;
         nomatch ->
             {error, illegal_database_name}
         end
