@@ -19,9 +19,11 @@
 -export([all_docs/2, changes/3, map_view/4, reduce_view/4, group_info/2]).
 -export([create_db/1, delete_db/2, reset_validation_funs/1, set_security/3,
     set_revs_limit/3, create_shard_db_doc/2]).
+-export([get_spatial_index/5]).
 
 -include("fabric.hrl").
 -include_lib("couch/include/couch_db.hrl").
+-include_lib("couch/include/couch_spatial.hrl").
 
 -record (view_acc, {
     db,
@@ -235,6 +237,13 @@ reset_validation_funs(DbName) ->
     _ ->
         ok
     end.
+
+% MW: This doesn't really work - I think we need to follow the pattern used in map_view
+get_spatial_index(DbName, _, DDoc, Name, Stale) ->
+    % MW: Ignore Db as this is the user-facing DB, not the actual DB we want to operate on - with_db method adds the right one
+    % TODO - remove Db from all functions in call stack?
+    ?LOG_INFO("get_spatial_index ~p", [DbName]),
+    with_db(DbName, [], {couch_spatial, get_spatial_index, [DDoc, Name, Stale]}).
 
 %%
 %% internal

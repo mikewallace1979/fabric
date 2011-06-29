@@ -34,6 +34,9 @@
 -export([design_docs/1, reset_validation_funs/1, cleanup_index_files/0,
     cleanup_index_files/1]).
 
+% geo
+-export([get_spatial_index/5]).
+
 -include("fabric.hrl").
 
 -type dbname() :: (iodata() | #db{}).
@@ -332,6 +335,11 @@ cleanup_index_files(DbName) ->
     end,
     [file:delete(File) || File <- DeleteFiles],
     ok.
+
+% TODO add -spec
+%% spatial indexing
+get_spatial_index(Db, DDoc, Name, Stale, DbName) ->
+    fabric_spatial:go(Db, DDoc, Name, Stale, DbName).
 
 %% some simple type validation and transcoding
 
