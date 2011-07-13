@@ -47,7 +47,7 @@ go(DbName, Id, Options) ->
             run_sync_repair(DbName, Id, RepairOpts, SuppressDeletedDoc);
         Error ->
             Error
-        end,
+        end
     after
         rexi_monitor:stop(RexiMon)
     end.
