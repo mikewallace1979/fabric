@@ -171,12 +171,22 @@ is_repair_needed(_, _) ->
 maybe_execute_read_repair(_Db, false) ->
     ok;
 maybe_execute_read_repair(Db, Docs) ->
-    spawn(fun() ->
-        [#doc{id=Id} | _] = Docs,
-        Ctx = #user_ctx{roles=[<<"_admin">>]},
-        Res = fabric:update_docs(Db, Docs, [replicated_changes, {user_ctx,Ctx}]),
-        twig:log(notice, "read_repair ~s ~s ~p", [Db, Id, Res])
-    end).
+    BlockingRepair = list_to_atom(couch_config:get("cluster",
+                                                   "blocking_repair",
+                                                   "false")),
+    if BlockingRepair ->
+        execute_update_docs(Db, Docs);
+       true ->
+        spawn(fun() ->
+                  execute_update_docs(Db, Docs)
+              end)
+    end.
+
+execute_update_docs(Db, Docs) ->
+    [#doc{id=Id} | _] = Docs,
+    Ctx = #user_ctx{roles=[<<"_admin">>]},
+    Res = fabric:update_docs(Db, Docs, [replicated_changes, {user_ctx,Ctx}]),
+    twig:log(notice, "read_repair ~s ~s ~p", [Db, Id, Res]).
 
 % hackery required so that not_found sorts first
 strip_not_found_missing([]) ->
@@ -194,6 +204,7 @@ unstrip_not_found_missing([Else | Rest]) ->
     [Else | unstrip_not_found_missing(Rest)].
 
 all_revs_test() ->
+    couch_config:start_link([]),
     State0 = #state{worker_count = 3, workers=[nil,nil,nil], r = 2, revs = all},
     Foo1 = {ok, #doc{revs = {1, [<<"foo">>]}}},
     Foo2 = {ok, #doc{revs = {2, [<<"foo2">>, <<"foo">>]}}},
@@ -236,9 +247,11 @@ all_revs_test() ->
     ?assertEqual(
         {stop, [Bar1, Foo1]},
         handle_message({ok, [Bar1]}, nil, State2)
-    ).
+      ),
+    couch_config:stop().
 
 specific_revs_test() ->
+    couch_config:start_link([]),
     Revs = [{1,<<"foo">>}, {1,<<"bar">>}, {1,<<"baz">>}],
     State0 = #state{
         worker_count = 3,
@@ -299,4 +312,5 @@ specific_revs_test() ->
     ?assertEqual(
         {stop, [Foo2, Bar1, Baz2]},
         handle_message({ok, [Foo2, Bar1, Baz2]}, nil, State2L)
-    ).
+      ),
+    couch_config:stop().

@@ -15,7 +15,7 @@
 -module(fabric_util).
 
 -export([submit_jobs/3, cleanup/1, recv/4, get_db/1, error_info/1,
-        update_counter/3, remove_ancestors/2,
+        update_counter/3, remove_ancestors/2, is_valid/1,
         create_monitors/1, quorum_met/2,  kv/2]).
 
 -include("fabric.hrl").
@@ -79,6 +79,21 @@ error_info({Error, Stack}) ->
 update_counter(Item, Incr, D) ->
     UpdateFun = fun ({Old, Count}) -> {Old, Count + Incr} end,
     orddict:update(make_key(Item), UpdateFun, {Item, Incr}, D).
+
+is_valid({ok, L}) when is_list(L) ->
+    is_valid(L);
+is_valid([]) ->
+    true;
+is_valid([{ok, #doc{}} | Rest]) ->
+    is_valid(Rest);
+is_valid([{{not_found, missing}, _Rev} | Rest]) ->
+    is_valid(Rest);
+is_valid({ok, #doc{}}) ->
+    true;
+is_valid({not_found, _}) ->
+    true;
+is_valid(_Else) ->
+    false.
 
 make_key({ok, L}) when is_list(L) ->
     make_key(L);

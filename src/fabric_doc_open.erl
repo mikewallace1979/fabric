@@ -25,6 +25,9 @@ go(DbName, Id, Options) ->
         [Id, [deleted|Options]]),
     SuppressDeletedDoc = not lists:member(deleted, Options),
     R = couch_util:get_value(r, Options, couch_config:get("cluster","r","2")),
+    BlockingRepair = list_to_atom(couch_config:get("cluster",
+                                                   "blocking_repair",
+                                                   "false")),
     RepairOpts = [{r, integer_to_list(mem3:n(DbName))} | Options],
     RexiMon = fabric_util:create_monitors(Workers),
     Acc0 = {Workers, list_to_integer(R), []},
@@ -33,26 +36,33 @@ go(DbName, Id, Options) ->
         {ok, Reply} ->
             format_reply(Reply, SuppressDeletedDoc);
         {error, needs_repair, Reply} ->
-            spawn(fabric, open_revs, [DbName, Id, all, RepairOpts]),
-            format_reply(Reply, SuppressDeletedDoc);
-        {error, needs_repair} ->
-                                                % we couldn't determine the correct reply, so we'll run a sync repair
-            {ok, Results} = fabric:open_revs(DbName, Id, all, RepairOpts),
-            case lists:partition(fun({ok, #doc{deleted=Del}}) -> Del end, Results) of
-            {[], []} ->
-                {not_found, missing};
-            {_DeletedDocs, []} when SuppressDeletedDoc ->
-                {not_found, deleted};
-            {DeletedDocs, []} ->
-                lists:last(lists:sort(DeletedDocs));
-            {_, LiveDocs} ->
-                lists:last(lists:sort(LiveDocs))
+            if BlockingRepair ->
+                run_sync_repair(DbName, Id, RepairOpts, SuppressDeletedDoc);
+               true ->
+                spawn(fabric, open_revs, [DbName, Id, all, RepairOpts]),
+                format_reply(Reply, SuppressDeletedDoc)
             end;
+        {error, needs_repair} ->
+            % we couldn't determine the correct reply, so we'll run a sync repair
+            run_sync_repair(DbName, Id, RepairOpts, SuppressDeletedDoc);
         Error ->
             Error
         end
     after
         rexi_monitor:stop(RexiMon)
+    end.
+
+run_sync_repair(DbName, Id, RepairOpts, SuppressDeletedDoc) ->
+    {ok, Results} = fabric:open_revs(DbName, Id, all, RepairOpts),
+    case lists:partition(fun({ok, #doc{deleted=Del}}) -> Del end, Results) of
+    {[], []} ->
+        {not_found, missing};
+    {_DeletedDocs, []} when SuppressDeletedDoc ->
+        {not_found, deleted};
+    {DeletedDocs, []} ->
+        lists:last(lists:sort(DeletedDocs));
+    {_, LiveDocs} ->
+        lists:last(lists:sort(LiveDocs))
     end.
 
 format_reply({ok, #doc{deleted=true}}, true) ->
@@ -68,24 +78,29 @@ handle_message({rexi_DOWN, _, {_,NodeRef},_}, _Worker, {Workers, R, Replies}) ->
     {ok, {NewWorkers, R, Replies}};
 handle_message({rexi_EXIT, _Reason}, Worker, Acc0) ->
     skip_message(Worker, Acc0);
-handle_message(Reply, Worker, {Workers, R, Replies}) ->
-    NewReplies = fabric_util:update_counter(Reply, 1, Replies),
-    Reduced = fabric_util:remove_ancestors(NewReplies, []),
-    case lists:dropwhile(fun({_,{_, Count}}) -> Count < R end, Reduced) of
-    [{_,{QuorumReply, _}} | _] ->
-        fabric_util:cleanup(lists:delete(Worker,Workers)),
-        if length(NewReplies) =:= 1 ->
-            {stop, QuorumReply};
-        true ->
-            % we had some disagreement amongst the workers, so repair is useful
-            {error, needs_repair, QuorumReply}
+handle_message(Reply, Worker, {Workers, R, Replies}=Acc0) ->
+    GoodReply = fabric_util:is_valid(Reply),
+    if (GoodReply) ->
+        NewReplies = fabric_util:update_counter(Reply, 1, Replies),
+        Reduced = fabric_util:remove_ancestors(NewReplies, []),
+        case lists:dropwhile(fun({_,{_, Count}}) -> Count < R end, Reduced) of
+        [{_,{QuorumReply, _}} | _] ->
+            fabric_util:cleanup(lists:delete(Worker,Workers)),
+            if length(NewReplies) =:= 1 ->
+                {stop, QuorumReply};
+               true ->
+                % we had some disagreement amongst the workers, so repair is useful
+                {error, needs_repair, QuorumReply}
+            end;
+        [] ->
+            if length(Workers) =:= 1 ->
+                {error, needs_repair};
+               true ->
+                {ok, {lists:delete(Worker,Workers), R, NewReplies}}
+            end
         end;
-    [] ->
-        if length(Workers) =:= 1 ->
-            {error, needs_repair};
-        true ->
-            {ok, {lists:delete(Worker,Workers), R, NewReplies}}
-        end
+       true ->
+        skip_message(Worker, Acc0)
     end.
 
 skip_message(_Worker, {Workers, _R, _Replies}) when length(Workers) =:= 1 ->
@@ -99,11 +114,16 @@ open_doc_test() ->
     Foo2 = {ok, #doc{revs = {2,[<<"foo2">>,<<"foo">>]}}},
     Bar1 = {ok, #doc{revs = {1,[<<"bar">>]}}},
     Baz1 = {ok, #doc{revs = {1,[<<"baz">>]}}},
+    Bad = {ok, bad},
     NF = {not_found, missing},
     State0 = {[nil, nil, nil], 2, []},
+    StateBad = {[nil, nil], 2, []},
     State1 = {[nil, nil], 2, [fabric_util:kv(Foo1,1)]},
     State2 = {[nil], 2, [fabric_util:kv(Bar1,1), fabric_util:kv(Foo1,1)]},
+
     ?assertEqual({ok, State1}, handle_message(Foo1, nil, State0)),
+
+    ?assertEqual({ok, StateBad}, handle_message(Bad, nil, State0)),
 
     % normal case - quorum reached, no disagreement
     ?assertEqual({stop, Foo1}, handle_message(Foo1, nil, State1)),
