@@ -21,8 +21,12 @@
 -export([create_db/1, delete_db/2, reset_validation_funs/1, set_security/3,
     set_revs_limit/3, create_shard_db_doc/2]).
 
+% MW Spatial stuff
+-export([spatial_index/4]).
+
 -include("fabric.hrl").
 -include_lib("couch/include/couch_db.hrl").
+-include_lib("couch/include/couch_spatial.hrl").
 
 -record (view_acc, {
     db,
@@ -33,6 +37,14 @@
     total_rows,
     reduce_fun = fun couch_db:enum_docs_reduce_to_count/1,
     group_level = 0
+}).
+
+-record (spatial_acc, {
+    db,
+    doc_info,
+    offset = nil, % MW TODO remove?
+    total_rows,
+    update_seq
 }).
 
 %% rpc endpoints
@@ -267,6 +279,35 @@ reset_validation_funs(DbName) ->
         ok
     end.
 
+%% MW Spatial stuff
+
+spatial_index(DbName, DDoc, ViewName, QueryArgs) ->
+    ?LOG_DEBUG("Starting spatial_index ~p", [ViewName]),
+    {ok, Db} = couch_db:open_int(DbName, []),
+    #spatial_query_args{
+        bbox=Bbox,
+        stale=Stale,
+        count=Count,
+        bounds=Bounds
+    } = QueryArgs,
+    {LastSeq, MinSeq} = calculate_seqs(Db, Stale),
+    Group0 = couch_spatial_group:design_doc_to_spatial_group(DDoc),
+    {ok, Pid} = gen_server:call(couch_spatial, {get_group_server, DbName, Group0}),
+    {ok, Group} = couch_spatial_group:request_group(Pid, MinSeq),
+    UpdateSeq = Group#spatial_group.current_seq,
+    maybe_update_view_group(Pid, LastSeq, Stale),
+    erlang:monitor(process, Group#spatial_group.fd),
+    Index = fabric_view:extract_view(Pid, ViewName, Group#spatial_group.indexes, spatial),
+    {ok, Total} = couch_spatial:get_item_count(Group#spatial_group.fd, Index#spatial.treepos),
+    Acc0 = #spatial_acc{
+        db = Db,
+        total_rows = Total,
+        update_seq = UpdateSeq
+    },
+    {ok, Acc} = couch_spatial:fold(
+         Group, Index, fun spatial_fold/2, Acc0, Bbox, Bounds),
+    final_response({Total, LastSeq}, Acc#spatial_acc.offset).
+
 %%
 %% internal
 %%
@@ -286,6 +327,30 @@ with_db(DbName, Options, {M,F,A}) ->
         end);
     Error ->
         rexi:reply(Error)
+    end.
+
+% MW spatial
+spatial_fold(KV, #spatial_acc{offset=nil, total_rows=Total, update_seq=UpdateSeq} = Acc) ->
+    % MW Hack - GeoCouch doesn't support offsets
+    Offset = 0,
+    case rexi:sync_reply({total_and_updateseq, Total, UpdateSeq}) of
+    ok ->
+        spatial_fold(KV, Acc#spatial_acc{offset=Offset});
+    stop ->
+        exit(normal);
+    timeout ->
+        exit(timeout)
+    end;
+spatial_fold({{Bbox, DocId}, {Geom, Value}}, Acc) ->
+    #spatial_acc{
+        db = Db,
+        doc_info = DocInfo
+    } = Acc,
+    case rexi:sync_reply(#view_row{key=Bbox, id=DocId, value={Geom, Value}, doc=undefined}) of
+        ok ->
+            {ok, Acc};
+        timeout ->
+            exit(timeout)
     end.
 
 view_fold(#full_doc_info{} = FullDocInfo, OffsetReds, Acc) ->
@@ -348,6 +413,14 @@ view_fold({{Key,Id}, Value}, _Offset, Acc) ->
             exit(timeout)
     end.
 
+final_response({Total, UpdateSeq}, nil) ->
+    case rexi:sync_reply({total_and_updateseq, Total, UpdateSeq}) of ok ->
+        rexi:reply(complete);
+    stop ->
+        ok;
+    timeout ->
+        exit(timeout)
+    end;
 final_response(Total, nil) ->
     case rexi:sync_reply({total_and_offset, Total, Total}) of ok ->
         rexi:reply(complete);

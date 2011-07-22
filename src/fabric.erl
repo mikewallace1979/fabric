@@ -16,6 +16,7 @@
 
 -include_lib("mem3/include/mem3.hrl").
 -include_lib("couch/include/couch_db.hrl").
+-include_lib("couch/include/couch_spatial.hrl").
 
 -define(ADMIN_CTX, {user_ctx, #user_ctx{roles = [<<"_admin">>]}}).
 
@@ -31,6 +32,9 @@
 % Views
 -export([all_docs/4, changes/4, query_view/3, query_view/4, query_view/6,
     get_view_group_info/2]).
+
+% MW Spatial
+-export([query_spatial/6]).
 
 % miscellany
 -export([design_docs/1, reset_validation_funs/1, cleanup_index_files/0,
@@ -341,6 +345,16 @@ cleanup_index_files(DbName) ->
     end,
     [file:delete(File) || File <- DeleteFiles],
     ok.
+
+%% MW spatial
+
+-spec query_spatial(dbname(), #doc{}, iodata(), callback(), any(),
+        #spatial_query_args{}) ->
+    any().
+query_spatial(DbName, Design, SpatialName, Callback, Acc0, QueryArgs) ->
+    Db = dbname(DbName),
+    View = name(SpatialName),
+    fabric_spatial:go(Db, Design, View, QueryArgs, Callback, Acc0).
 
 %% some simple type validation and transcoding
 

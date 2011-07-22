@@ -31,7 +31,8 @@
     reducer,
     lang,
     sorted,
-    user_acc
+    user_acc,
+    update_seq = 0  % MW added update_seq for spatial queries
 }).
 
 -record(view_row, {key, id, value, doc, worker}).

@@ -21,6 +21,7 @@
 -include("fabric.hrl").
 -include_lib("mem3/include/mem3.hrl").
 -include_lib("couch/include/couch_db.hrl").
+-include_lib("couch/include/couch_spatial.hrl").
 
 %% @doc looks for a fully covered keyrange in the list of counters
 -spec is_progress_possible([{#shard{}, term()}]) -> boolean().
@@ -146,6 +147,11 @@ maybe_send_row(State) ->
 %% the values contain "_id" then use the "_id"s
 %% to retrieve documents and embed in result
 possibly_embed_doc(_State,
+              #view_row{value={Geom, Value}}=Row) ->
+    % MW Hack so we don't try and include docs for a spatial query
+    % (needed because query_args are #spatial_query_args, not #view_query_args)
+    Row;
+possibly_embed_doc(_State,
               #view_row{id=reduced}=Row) ->
     Row;
 possibly_embed_doc(_State,
@@ -229,6 +235,9 @@ find_next_key([], _, _) ->
 find_next_key([Key|Rest], _, _) ->
     {Key, Rest}.
 
+% MW If we used a spatial_row record this would be clearer
+transform_row(#view_row{key=Key, id=DocId, value={Geom, Value}}) ->
+    {row, {{Key, DocId}, {Geom, Value}}};
 transform_row(#view_row{key=Key, id=reduced, value=Value}) ->
     {row, {[{key,Key}, {value,Value}]}};
 transform_row(#view_row{key=Key, id=undefined}) ->
@@ -265,7 +274,9 @@ extract_view(Pid, ViewName, [View|Rest], ViewType) ->
 view_names(View, Type) when Type == red_map; Type == reduce ->
     [Name || {Name, _} <- View#view.reduce_funs];
 view_names(View, map) ->
-    View#view.map_names.
+    View#view.map_names;
+view_names(View, spatial) ->
+    View#spatial.index_names.
 
 index_of(X, List) ->
     index_of(X, List, 1).
@@ -281,6 +292,14 @@ get_shards(DbName, #view_query_args{stale=Stale})
   when Stale == ok orelse Stale == update_after ->
     mem3:ushards(DbName);
 get_shards(DbName, #view_query_args{stale=false}) ->
+    mem3:shards(DbName);
+get_shards(DbName, #spatial_query_args{stale=Stale})
+  when Stale == ok orelse Stale == update_after ->
+    mem3:ushards(DbName);
+get_shards(DbName, #spatial_query_args{stale=false}) ->
+    mem3:shards(DbName);
+% TODO MW GeoCouch uses stale=nil as default - should update and remove this clause
+get_shards(DbName, #spatial_query_args{stale=nil}) ->
     mem3:shards(DbName).
 
 % unit test
