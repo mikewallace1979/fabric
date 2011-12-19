@@ -25,9 +25,8 @@ go(DbName, GroupId) when is_binary(GroupId) ->
     go(DbName, DDoc);
 
 go(DbName, #doc{} = DDoc) ->
-    Group = couch_view_group:design_doc_to_view_group(DDoc),
     Shards = mem3:shards(DbName),
-    Workers = fabric_util:submit_jobs(Shards, group_info, [Group]),
+    Workers = fabric_util:submit_jobs(Shards, group_info, [DDoc]),
     RexiMon = fabric_util:create_monitors(Shards),
     Acc0 = {fabric_dict:init(Workers, nil), []},
     try
@@ -81,8 +80,10 @@ merge_results(Info) ->
             [{language, X} | Acc];
         (disk_size, X, Acc) ->
             [{disk_size, lists:sum(X)} | Acc];
-        (data_size, X, Acc) ->
-            [{data_size, lists:sum(X)} | Acc];
+        (data_size, _X, Acc) ->
+            % couch_index gets size from couch_btree:size which isn't
+            % only returns nil for couchdb < 1.2, so just return null
+            [{data_size, null} | Acc];
         (compact_running, X, Acc) ->
             [{compact_running, lists:member(true, X)} | Acc];
         (updater_running, X, Acc) ->

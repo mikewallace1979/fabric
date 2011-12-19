@@ -17,6 +17,7 @@
 -export([go/6]).
 
 -include("fabric.hrl").
+-include_lib("couch_mrview/include/couch_mrview.hrl").
 -include_lib("mem3/include/mem3.hrl").
 -include_lib("couch/include/couch_db.hrl").
 
@@ -25,27 +26,27 @@ go(DbName, GroupId, View, Args, Callback, Acc0) when is_binary(GroupId) ->
     go(DbName, DDoc, View, Args, Callback, Acc0);
 
 go(DbName, DDoc, VName, Args, Callback, Acc0) ->
-    #group{def_lang=Lang, views=Views} = Group =
-        couch_view_group:design_doc_to_view_group(DDoc),
+    {ok, #mrst{language=Lang, views=Views}} = couch_mrview_util:ddoc_to_mrst(
+            DbName, DDoc),
     {NthRed, View} = fabric_view:extract_view(nil, VName, Views, reduce),
-    {VName, RedSrc} = lists:nth(NthRed, View#view.reduce_funs),
+    {VName, RedSrc} = lists:nth(NthRed, View#mrview.reduce_funs),
     Workers = lists:map(fun(#shard{name=Name, node=N} = Shard) ->
-        Ref = rexi:cast(N, {fabric_rpc, reduce_view, [Name,Group,VName,Args]}),
+        Ref = rexi:cast(N, {fabric_rpc, reduce_view, [Name,DDoc,VName,Args]}),
         Shard#shard{ref = Ref}
     end, fabric_view:get_shards(DbName, Args)),
     RexiMon = fabric_util:create_monitors(Workers),
     BufferSize = couch_config:get("fabric", "reduce_buffer_size", "20"),
-    #view_query_args{limit = Limit, skip = Skip} = Args,
+    #mrargs{limit = Limit, skip = Skip} = Args,
     State = #collector{
         db_name = DbName,
         query_args = Args,
         callback = Callback,
         buffer_size = list_to_integer(BufferSize),
         counters = fabric_dict:init(Workers, 0),
-        keys = Args#view_query_args.keys,
+        keys = Args#mrargs.keys,
         skip = Skip,
         limit = Limit,
-        lang = Group#group.def_lang,
+        lang = Lang,
         os_proc = couch_query_servers:get_os_process(Lang),
         reducer = RedSrc,
         rows = dict:new(),
@@ -99,7 +100,38 @@ handle_message(#view_row{key=Key} = Row, {Worker, From}, State) ->
 handle_message(complete, Worker, State) ->
     C1 = fabric_dict:update_counter(Worker, 1, State#collector.counters),
     C2 = fabric_view:remove_overlapping_shards(Worker, C1),
-    fabric_view:maybe_send_row(State#collector{counters = C2}).
+    fabric_view:maybe_send_row(State#collector{counters = C2});
+
+handle_message({meta, Meta}, {Worker, From}, State) ->
+    #collector{
+        callback = Callback,
+        counters = Counters0,
+        user_acc = AccIn
+    } = State,
+    case fabric_dict:lookup_element(Worker, Counters0) of
+    undefined ->
+        % this worker lost the race with other partition copies, terminate
+        gen_server:reply(From, stop),
+        {ok, State};
+    0 ->
+        gen_server:reply(From, ok),
+        C1 = fabric_dict:update_counter(Worker, 1, Counters0),
+        % TODO time this call, if slow don't do it every time
+        C2 = fabric_view:remove_overlapping_shards(Worker, C1),
+        State1 = State#collector{counters=C2},
+        State2 = fabric_view:maybe_pause_worker(Worker, From, State1),
+        case fabric_dict:any(0, C2) of
+        true ->
+            {ok, State2};
+        false ->
+            {Go, Acc} = Callback({meta, Meta}, AccIn),
+            {Go, State2#collector{
+                counters = fabric_dict:decrement_all(C2),
+                user_acc = Acc
+            }}
+        end
+    end.
+
 
 complete_worker_test() ->
     Shards =

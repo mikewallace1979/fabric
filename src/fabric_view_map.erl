@@ -19,6 +19,7 @@
 -include("fabric.hrl").
 -include_lib("mem3/include/mem3.hrl").
 -include_lib("couch/include/couch_db.hrl").
+-include_lib("couch_mrview/include/couch_mrview.hrl").
 
 go(DbName, GroupId, View, Args, Callback, Acc0) when is_binary(GroupId) ->
     {ok, DDoc} = fabric:open_doc(DbName, <<"_design/", GroupId/binary>>, []),
@@ -28,7 +29,7 @@ go(DbName, DDoc, View, Args, Callback, Acc0) ->
     Shards = fabric_view:get_shards(DbName, Args),
     Workers = fabric_util:submit_jobs(Shards, map_view, [DDoc, View, Args]),
     BufferSize = couch_config:get("fabric", "map_buffer_size", "2"),
-    #view_query_args{limit = Limit, skip = Skip, keys = Keys} = Args,
+    #mrargs{limit = Limit, skip = Skip, keys = Keys} = Args,
     State = #collector{
         db_name=DbName,
         query_args = Args,
@@ -38,7 +39,7 @@ go(DbName, DDoc, View, Args, Callback, Acc0) ->
         skip = Skip,
         limit = Limit,
         keys = fabric_view:keydict(Keys),
-        sorted = Args#view_query_args.sorted,
+        sorted = true,
         user_acc = Acc0
     },
     RexiMon = fabric_util:create_monitors(Workers),
@@ -69,7 +70,7 @@ handle_message({rexi_EXIT, Reason}, Worker, State) ->
         {error, Resp}
     end;
 
-handle_message({total_and_offset, Tot, Off}, {Worker, From}, State) ->
+handle_message({meta, Meta}, {Worker, From}, State) ->
     #collector{
         callback = Callback,
         counters = Counters0,
@@ -86,8 +87,8 @@ handle_message({total_and_offset, Tot, Off}, {Worker, From}, State) ->
         gen_server:reply(From, ok),
         Counters1 = fabric_dict:update_counter(Worker, 1, Counters0),
         Counters2 = fabric_view:remove_overlapping_shards(Worker, Counters1),
-        Total = Total0 + Tot,
-        Offset = Offset0 + Off,
+        Total = Total0 + couch_util:get_value(total, Meta),
+        Offset = Offset0 + couch_util:get_value(offset, Meta),
         case fabric_dict:any(0, Counters2) of
         true ->
             {ok, State#collector{
@@ -97,7 +98,7 @@ handle_message({total_and_offset, Tot, Off}, {Worker, From}, State) ->
             }};
         false ->
             FinalOffset = erlang:min(Total, Offset+State#collector.skip),
-            {Go, Acc} = Callback({total_and_offset, Total, FinalOffset}, AccIn),
+            {Go, Acc} = Callback({meta, Meta}, AccIn),
             {Go, State#collector{
                 counters = fabric_dict:decrement_all(Counters2),
                 total_rows = Total,
@@ -120,7 +121,7 @@ handle_message(#view_row{} = Row, {_,From}, #collector{sorted=false} = St) ->
 
 handle_message(#view_row{} = Row, {Worker, From}, State) ->
     #collector{
-        query_args = #view_query_args{direction=Dir},
+        query_args = #mrargs{direction=Dir},
         counters = Counters0,
         rows = Rows0,
         keys = KeyDict
@@ -134,6 +135,7 @@ handle_message(#view_row{} = Row, {Worker, From}, State) ->
 handle_message(complete, Worker, State) ->
     Counters = fabric_dict:update_counter(Worker, 1, State#collector.counters),
     fabric_view:maybe_send_row(State#collector{counters = Counters}).
+
 
 merge_row(fwd, undefined, Row, Rows) ->
     lists:merge(fun(#view_row{key=KeyA, id=IdA}, #view_row{key=KeyB, id=IdB}) ->

@@ -23,54 +23,25 @@
 
 -include("fabric.hrl").
 -include_lib("couch/include/couch_db.hrl").
-
--record (view_acc, {
-    db,
-    limit,
-    include_docs,
-    conflicts,
-    doc_info = nil,
-    offset = nil,
-    total_rows,
-    reduce_fun = fun couch_db:enum_docs_reduce_to_count/1,
-    group_level = 0
-}).
+-include_lib("couch_mrview/include/couch_mrview.hrl").
 
 %% rpc endpoints
 %%  call to with_db will supply your M:F with a #db{} and then remaining args
-
-all_docs(DbName, #view_query_args{keys=nil} = QueryArgs) ->
+all_docs(DbName, Args0) ->
+    all_docs(DbName, Args0, fun default_cb/2, []).
+all_docs(DbName, #mrargs{keys=undefined} = Args0, Callback, Acc) ->
     {ok, Db} = get_or_create_db(DbName, []),
-    #view_query_args{
-        start_key = StartKey,
-        start_docid = StartDocId,
-        end_key = EndKey,
-        end_docid = EndDocId,
-        limit = Limit,
-        skip = Skip,
-        include_docs = IncludeDocs,
-        conflicts = Conflicts,
-        direction = Dir,
-        inclusive_end = Inclusive,
-        extra = Extra
-    } = QueryArgs,
-    set_io_priority(DbName, Extra),
-    {ok, Total} = couch_db:get_doc_count(Db),
-    Acc0 = #view_acc{
-        db = Db,
-        include_docs = IncludeDocs,
-        conflicts = Conflicts,
-        limit = Limit+Skip,
-        total_rows = Total
-    },
-    EndKeyType = if Inclusive -> end_key; true -> end_key_gt end,
-    Options = [
-        {dir, Dir},
-        {start_key, if is_binary(StartKey) -> StartKey; true -> StartDocId end},
-        {EndKeyType, if is_binary(EndKey) -> EndKey; true -> EndDocId end}
-    ],
-    {ok, _, Acc} = couch_db:enum_docs(Db, fun view_fold/3, Acc0, Options),
-    final_response(Total, Acc#view_acc.offset).
+    Sig = couch_util:with_db(Db, fun(WDb) ->
+        {ok, Info} = couch_db:get_db_info(WDb),
+        couch_index_util:hexsig(couch_util:md5(term_to_binary(Info)))
+    end),
+    Args1 = Args0#mrargs{view_type=map},
+    Args2 = couch_mrview_util:validate_args(Args1),
+    {ok, Acc1} = case Args2#mrargs.preflight_fun of
+        PFFun when is_function(PFFun, 2) -> PFFun(Sig, Acc);
+        _ -> {ok, Acc}
+    end,
+    all_docs_fold(Db, Args2, Callback, Acc1).
 
 changes(DbName, Args, StartSeq) ->
     erlang:put(io_priority, {interactive, DbName}),
@@ -93,98 +64,62 @@ changes(DbName, Args, StartSeq) ->
 
 map_view(DbName, DDoc, ViewName, QueryArgs) ->
     {ok, Db} = get_or_create_db(DbName, []),
-    #view_query_args{
+    #mrargs{
         limit = Limit,
         skip = Skip,
-        keys = Keys,
-        include_docs = IncludeDocs,
-        conflicts = Conflicts,
-        stale = Stale,
-        view_type = ViewType,
         extra = Extra
     } = QueryArgs,
     set_io_priority(DbName, Extra),
-    {LastSeq, MinSeq} = calculate_seqs(Db, Stale),
-    Group0 = couch_view_group:design_doc_to_view_group(DDoc),
-    {ok, Pid} = gen_server:call(couch_view, {get_group_server, DbName, Group0}),
-    {ok, Group} = couch_view_group:request_group(Pid, MinSeq),
-    maybe_update_view_group(Pid, LastSeq, Stale),
-    erlang:monitor(process, Group#group.fd),
-    View = fabric_view:extract_view(Pid, ViewName, Group#group.views, ViewType),
-    {ok, Total} = couch_view:get_row_count(View),
-    Acc0 = #view_acc{
+    {ok, {_Type, View}, _Sig, _Args} = couch_mrview_util:get_view(
+            Db, DDoc, ViewName, QueryArgs),
+    {ok, Total} = couch_mrview_util:get_row_count(View),
+    Acc0 = #mracc{
         db = Db,
-        include_docs = IncludeDocs,
-        conflicts = Conflicts,
-        limit = Limit+Skip,
+        limit = Limit,
+        skip = Skip,
         total_rows = Total,
-        reduce_fun = fun couch_view:reduce_to_count/1
+        reduce_fun = fun couch_mrview_util:reduce_to_count/1,
+        update_seq = View#mrview.update_seq,
+        args = QueryArgs
     },
-    case Keys of
-    nil ->
-        Options = couch_httpd_view:make_key_options(QueryArgs),
-        {ok, _, Acc} = couch_view:fold(View, fun view_fold/3, Acc0, Options);
-    _ ->
-        Acc = lists:foldl(fun(Key, AccIn) ->
-            KeyArgs = QueryArgs#view_query_args{start_key=Key, end_key=Key},
-            Options = couch_httpd_view:make_key_options(KeyArgs),
-            {_Go, _, Out} = couch_view:fold(View, fun view_fold/3, AccIn,
-                Options),
-            Out
-        end, Acc0, Keys)
-    end,
-    final_response(Total, Acc#view_acc.offset).
+    OptList = couch_mrview_util:key_opts(QueryArgs),
+    {Reds, Acc} = lists:foldl(fun(Opts, AccIn) ->
+        {ok, R, A} = couch_mrview_util:fold(View, fun map_fold/3, AccIn,
+            Opts),
+        {R, A}
+    end, Acc0, OptList),
+    Offset = couch_mrview_util:reduce_to_count(Reds),
+    finish_fold(Acc, [{total, Total}, {offset, Offset}]).
 
-reduce_view(DbName, Group0, ViewName, QueryArgs) ->
+reduce_view(DbName, DDoc, ViewName, QueryArgs) ->
     erlang:put(io_priority, {interactive, DbName}),
     {ok, Db} = get_or_create_db(DbName, []),
-    #view_query_args{
+    #mrargs{
         group_level = GroupLevel,
         limit = Limit,
         skip = Skip,
-        keys = Keys,
-        stale = Stale,
         extra = Extra
     } = QueryArgs,
     set_io_priority(DbName, Extra),
     GroupFun = group_rows_fun(GroupLevel),
-    {LastSeq, MinSeq} = calculate_seqs(Db, Stale),
-    {ok, Pid} = gen_server:call(couch_view, {get_group_server, DbName, Group0}),
-    {ok, Group} = couch_view_group:request_group(Pid, MinSeq),
-    maybe_update_view_group(Pid, LastSeq, Stale),
-    #group{views=Views, def_lang=Lang, fd=Fd} = Group,
-    erlang:monitor(process, Fd),
-    {NthRed, View} = fabric_view:extract_view(Pid, ViewName, Views, reduce),
-    ReduceView = {reduce, NthRed, Lang, View},
-    Acc0 = #view_acc{group_level = GroupLevel, limit = Limit+Skip},
-    case Keys of
-    nil ->
-        Options0 = couch_httpd_view:make_key_options(QueryArgs),
-        Options = [{key_group_fun, GroupFun} | Options0],
-        couch_view:fold_reduce(ReduceView, fun reduce_fold/3, Acc0, Options);
-    _ ->
-        lists:map(fun(Key) ->
-            KeyArgs = QueryArgs#view_query_args{start_key=Key, end_key=Key},
-            Options0 = couch_httpd_view:make_key_options(KeyArgs),
-            Options = [{key_group_fun, GroupFun} | Options0],
-            couch_view:fold_reduce(ReduceView, fun reduce_fold/3, Acc0, Options)
-        end, Keys)
-    end,
-    rexi:reply(complete).
-
-calculate_seqs(Db, Stale) ->
-    LastSeq = couch_db:get_update_seq(Db),
-    if
-        Stale == ok orelse Stale == update_after ->
-            {LastSeq, 0};
-        true ->
-            {LastSeq, LastSeq}
-    end.
-
-maybe_update_view_group(GroupPid, LastSeq, update_after) ->
-    couch_view_group:trigger_group_update(GroupPid, LastSeq);
-maybe_update_view_group(_, _, _) ->
-    ok.
+    {ok, {_Type, {_Nth, _Lang, View}=RedView}, _Sig, _Args} =
+            couch_mrview_util:get_view(Db, DDoc, ViewName, QueryArgs),
+    Acc = #mracc{
+        db = Db,
+        total_rows = null,
+        group_level = GroupLevel,
+        limit = Limit,
+        skip = Skip,
+        update_seq = View#mrview.update_seq,
+        args = QueryArgs
+    },
+    OptList = couch_mrview_util:key_opts(QueryArgs, [{key_group_fun, GroupFun}]),
+    Acc2 = lists:foldl(fun(Opts, Acc0) ->
+        {ok, Acc1} =
+            couch_mrview_util:fold_reduce(RedView, fun red_fold/3, Acc0, Opts),
+        Acc1
+    end, Acc, OptList),
+    finish_fold(Acc2, []).
 
 create_db(DbName) ->
     rexi:reply(case couch_server:create(DbName, []) of
@@ -256,9 +191,10 @@ update_docs(DbName, Docs0, Options) ->
     Docs = make_att_readers(Docs0),
     with_db(DbName, Options, {couch_db, update_docs, [Docs, Options, X]}).
 
-group_info(DbName, Group0) ->
-    {ok, Pid} = gen_server:call(couch_view, {get_group_server, DbName, Group0}),
-    rexi:reply(couch_view_group:request_group_info(Pid)).
+group_info(DbName, DDoc) ->
+    {ok, Db} = get_or_create_db(DbName, []),
+    {ok, Pid} = couch_index_server:get_index(couch_mrview_index, Db, DDoc),
+    rexi:reply(couch_index:get_info(Pid)).
 
 reset_validation_funs(DbName) ->
     case get_or_create_db(DbName, []) of
@@ -298,78 +234,202 @@ get_or_create_db(DbName, Options) ->
         Else
     end.
 
-view_fold(#full_doc_info{} = FullDocInfo, OffsetReds, Acc) ->
+map_fold(#full_doc_info{} = FullDocInfo, OffsetReds, Acc) ->
     % matches for _all_docs and translates #full_doc_info{} -> KV pair
     case couch_doc:to_doc_info(FullDocInfo) of
-    #doc_info{id=Id, revs=[#rev_info{deleted=false, rev=Rev}|_]} = DI ->
-        Value = {[{rev,couch_doc:rev_to_str(Rev)}]},
-        view_fold({{Id,Id}, Value}, OffsetReds, Acc#view_acc{doc_info=DI});
-    #doc_info{revs=[#rev_info{deleted=true}|_]} ->
-        {ok, Acc}
+        #doc_info{id=Id, revs=[#rev_info{deleted=false, rev=Rev}|_]} = DI ->
+            Value = {[{rev, couch_doc:rev_to_str(Rev)}]},
+            map_fold({{Id, Id}, Value}, OffsetReds, Acc#mracc{doc_info=DI});
+        #doc_info{revs=[#rev_info{deleted=true}|_]} ->
+            {ok, Acc}
     end;
-view_fold(KV, OffsetReds, #view_acc{offset=nil, total_rows=Total} = Acc) ->
-    % calculates the offset for this shard
-    #view_acc{reduce_fun=Reduce} = Acc,
+map_fold(_KV, _Offset, #mracc{skip=N}=Acc) when N > 0 ->
+    {ok, Acc#mracc{skip=N-1, last_go=ok}};
+map_fold(KV, OffsetReds, #mracc{offset=undefined}=Acc) ->
+    #mracc{
+        total_rows=Total,
+        reduce_fun=Reduce,
+        update_seq=UpdateSeq,
+        args=Args
+    } = Acc,
     Offset = Reduce(OffsetReds),
-    case rexi:sync_reply({total_and_offset, Total, Offset}) of
+    Meta = make_meta(Args, UpdateSeq, [{total, Total}, {offset, Offset}]),
+    Acc1 = Acc#mracc{meta_sent=true, offset=Offset},
+    case rexi:sync_reply(Meta) of
     ok ->
-        view_fold(KV, OffsetReds, Acc#view_acc{offset=Offset});
+        map_fold(KV, OffsetReds, Acc1#mracc{offset=Offset});
     stop ->
         exit(normal);
     timeout ->
         exit(timeout)
     end;
-view_fold(_KV, _Offset, #view_acc{limit=0} = Acc) ->
-    % we scanned through limit+skip local rows
+map_fold(_KV, _Offset, #mracc{limit=0}=Acc) ->
     {stop, Acc};
-view_fold({{Key,Id}, Value}, _Offset, Acc) ->
-    % the normal case
-    #view_acc{
-        db = Db,
-        doc_info = DocInfo,
-        limit = Limit,
-        conflicts = Conflicts,
-        include_docs = IncludeDocs
+map_fold({{Key, Id}, Val}, _Offset, Acc) ->
+    #mracc{
+        db=Db,
+        limit=Limit,
+        doc_info=DI,
+        args=Args
     } = Acc,
-    case Value of {Props} ->
-        LinkedDocs = (couch_util:get_value(<<"_id">>, Props) =/= undefined);
-    _ ->
-        LinkedDocs = false
+    Doc = case DI of
+        #doc_info{} -> couch_mrview_util:maybe_load_doc(Db, DI, Args);
+        _ -> couch_mrview_util:maybe_load_doc(Db, Id, Val, Args)
     end,
-    if LinkedDocs ->
-        % we'll embed this at a higher level b/c the doc may be non-local
-        Doc = undefined;
-    IncludeDocs ->
-        IdOrInfo = if DocInfo =/= nil -> DocInfo; true -> Id end,
-        Options = if Conflicts -> [conflicts]; true -> [] end,
-        case couch_db:open_doc(Db, IdOrInfo, Options) of
-        {not_found, deleted} ->
-            Doc = null;
-        {not_found, missing} ->
-            Doc = undefined;
-        {ok, Doc0} ->
-            Doc = couch_doc:to_json_obj(Doc0, [])
-        end;
-    true ->
-        Doc = undefined
+    Row = case Doc of
+        [] -> #view_row{key=Key, id=Id, value=Val, doc=undefined};
+        _ -> #view_row{key=Key, id=Id, value=Val,
+                doc=couch_util:get_value(doc, Doc)}
     end,
-    case rexi:sync_reply(#view_row{key=Key, id=Id, value=Value, doc=Doc}) of
+    case rexi:sync_reply(Row) of
         ok ->
-            {ok, Acc#view_acc{limit=Limit-1}};
+            {ok, Acc#mracc{limit=Limit-1}};
         timeout ->
             exit(timeout)
     end.
 
-final_response(Total, nil) ->
-    case rexi:sync_reply({total_and_offset, Total, Total}) of ok ->
-        rexi:reply(complete);
-    stop ->
-        ok;
-    timeout ->
-        exit(timeout)
+
+red_fold(_Key, _Red, #mracc{skip=N}=Acc) when N > 0 ->
+    {ok, Acc#mracc{skip=N-1, last_go=ok}};
+red_fold(Key, Red, #mracc{meta_sent=false}=Acc) ->
+    #mracc{
+        args=Args,
+        update_seq=UpdateSeq
+    } = Acc,
+    Meta = make_meta(Args, UpdateSeq, []),
+    case rexi:sync_reply(Meta) of
+        ok ->
+            Acc1 = Acc#mracc{meta_sent=true, last_go=ok},
+            red_fold(Key, Red, Acc1);
+        stop ->
+            exit(normal);
+        timeout ->
+            exit(timeout)
     end;
-final_response(_Total, _Offset) ->
+red_fold(_Key, _Red, #mracc{limit=0} = Acc) ->
+    {stop, Acc};
+red_fold(_Key, Red, #mracc{group_level=0} = Acc) ->
+    #mracc{
+        limit=Limit
+    } = Acc,
+    Row = #view_row{key=null, value=Red},
+    case rexi:sync_reply(Row) of
+        ok ->
+            {ok, Acc#mracc{limit=Limit-1}};
+        timeout ->
+            exit(timeout)
+    end;
+red_fold(Key, Red, #mracc{group_level=exact} = Acc) ->
+    #mracc{
+        limit=Limit
+    } = Acc,
+    Row = #view_row{key=Key, value=Red},
+    case rexi:sync_reply(Row) of
+        ok ->
+            {ok, Acc#mracc{limit=Limit-1}};
+        timeout ->
+            exit(timeout)
+    end;
+red_fold(K, Red, #mracc{group_level=I} = Acc) when I > 0, is_list(K) ->
+    #mracc{
+        limit=Limit
+    } = Acc,
+    Row = #view_row{key=lists:sublist(K, I), value=Red},
+    case rexi:sync_reply(Row) of
+        ok ->
+            {ok, Acc#mracc{limit=Limit-1}};
+        timeout ->
+            exit(timeout)
+    end;
+red_fold(K, Red, #mracc{group_level=I} = Acc) when I > 0 ->
+    #mracc{
+        limit=Limit
+    } = Acc,
+    Row = #view_row{key=K, value=Red},
+    case rexi:sync_reply(Row) of
+        ok ->
+            {ok, Acc#mracc{limit=Limit-1}};
+        timeout ->
+            exit(timeout)
+    end.
+
+
+all_docs_fold(Db, #mrargs{keys=undefined}=Args, Callback, UAcc) ->
+    {ok, Info} = couch_db:get_db_info(Db),
+    Total = couch_util:get_value(doc_count, Info),
+    UpdateSeq = couch_db:get_update_seq(Db),
+    Acc = #mracc{
+        db=Db,
+        total_rows=Total,
+        limit=Args#mrargs.limit,
+        skip=Args#mrargs.skip,
+        callback=Callback,
+        user_acc=UAcc,
+        reduce_fun=fun couch_mrview_util:all_docs_reduce_to_count/1,
+        update_seq=UpdateSeq,
+        args=Args
+    },
+    [Opts] = couch_mrview_util:all_docs_key_opts(Args),
+    {ok, Offset, FinalAcc} = couch_db:enum_docs(Db, fun map_fold/3, Acc, Opts),
+    finish_fold(FinalAcc, [{total, Total}, {offset, Offset}]);
+all_docs_fold(Db, #mrargs{direction=Dir, keys=Keys0}=Args, Callback, UAcc) ->
+    {ok, Info} = couch_db:get_db_info(Db),
+    Total = couch_util:get_value(doc_count, Info),
+    UpdateSeq = couch_db:get_update_seq(Db),
+    Acc = #mracc{
+        db=Db,
+        total_rows=Total,
+        limit=Args#mrargs.limit,
+        skip=Args#mrargs.skip,
+        callback=Callback,
+        user_acc=UAcc,
+        reduce_fun=fun couch_mrview_util:all_docs_reduce_to_count/1,
+        update_seq=UpdateSeq,
+        args=Args
+    },
+    % Backwards compatibility hack. The old _all_docs iterates keys
+    % in reverse if descending=true was passed. Here we'll just
+    % reverse the list instead.
+    Keys = if Dir =:= fwd -> Keys0; true -> lists:reverse(Keys0) end,
+
+    FoldFun = fun(Key, Acc0) ->
+        DocInfo = (catch couch_db:get_doc_info(Db, Key)),
+        {Doc, Acc1} = case DocInfo of
+            {ok, #doc_info{id=Id, revs=[RevInfo | _RestRevs]}=DI} ->
+                Rev = couch_doc:rev_to_str(RevInfo#rev_info.rev),
+                Props = [{rev, Rev}] ++ case RevInfo#rev_info.deleted of
+                    true -> [{deleted, true}];
+                    false -> []
+                end,
+                {{{Id, Id}, {Props}}, Acc0#mracc{doc_info=DI}};
+            not_found ->
+                {{{Key, error}, not_found}, Acc0}
+        end,
+        {_, Acc2} = map_fold(Doc, {[], [{0, 0, 0}]}, Acc1),
+        Acc2
+    end,
+    FinalAcc = lists:foldl(FoldFun, Acc, Keys),
+    finish_fold(FinalAcc, [{total, Total}]).
+
+finish_fold(#mracc{last_go=ok, update_seq=UpdateSeq}=Acc,  ExtraMeta) ->
+    #mracc{args=Args}=Acc,
+    % Possible send meta info
+    Meta = make_meta(Args, UpdateSeq, ExtraMeta),
+    case Acc#mracc.meta_sent of
+        false ->
+            case rexi:sync_reply(Meta) of
+                ok ->
+                    rexi:reply(complete);
+                stop ->
+                    {ok, Acc#mracc.user_acc};
+                timeout ->
+                    exit(timeout)
+            end;
+        _ -> rexi:reply(complete)
+    end;
+finish_fold(#mracc{user_acc=_UAcc}, _ExtraMeta) ->
     rexi:reply(complete).
+
 
 %% TODO: handle case of bogus group level
 group_rows_fun(exact) ->
@@ -383,27 +443,6 @@ group_rows_fun(GroupLevel) when is_integer(GroupLevel) ->
         Key1 == Key2
     end.
 
-reduce_fold(_Key, _Red, #view_acc{limit=0} = Acc) ->
-    {stop, Acc};
-reduce_fold(_Key, Red, #view_acc{group_level=0} = Acc) ->
-    send(null, Red, Acc);
-reduce_fold(Key, Red, #view_acc{group_level=exact} = Acc) ->
-    send(Key, Red, Acc);
-reduce_fold(K, Red, #view_acc{group_level=I} = Acc) when I > 0, is_list(K) ->
-    send(lists:sublist(K, I), Red, Acc);
-reduce_fold(K, Red, #view_acc{group_level=I} = Acc) when I > 0 ->
-    send(K, Red, Acc).
-
-
-send(Key, Value, #view_acc{limit=Limit} = Acc) ->
-    case rexi:sync_reply(#view_row{key=Key, value=Value}) of
-    ok ->
-        {ok, Acc#view_acc{limit=Limit-1}};
-    stop ->
-        exit(normal);
-    timeout ->
-        exit(timeout)
-    end.
 
 changes_enumerator(DocInfo, {Db, _Seq, Args}) ->
     #changes_args{
@@ -482,4 +521,20 @@ set_io_priority(DbName, Options) ->
         erlang:put(io_priority, Pri);
     false ->
         erlang:put(io_priority, {interactive, DbName})
+    end.
+
+
+default_cb(complete, Acc) ->
+    {ok, lists:reverse(Acc)};
+default_cb({final, Info}, []) ->
+    {ok, [Info]};
+default_cb({final, _}, Acc) ->
+    {ok, Acc};
+default_cb(Row, Acc) ->
+    {ok, [Row | Acc]}.
+
+make_meta(Args, UpdateSeq, Base) ->
+    case Args#mrargs.update_seq of
+        true -> {meta, Base ++ [{update_seq, UpdateSeq}]};
+        _ -> {meta, Base}
     end.

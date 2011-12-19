@@ -21,6 +21,7 @@
 -include("fabric.hrl").
 -include_lib("mem3/include/mem3.hrl").
 -include_lib("couch/include/couch_db.hrl").
+-include_lib("couch_mrview/include/couch_mrview.hrl").
 
 -spec remove_down_shards(#collector{}, node()) ->
     {ok, #collector{}} | {error, any()}.
@@ -143,7 +144,7 @@ maybe_send_row(State) ->
         {_, NewState} when Skip > 0 ->
             maybe_send_row(NewState#collector{skip=Skip-1});
         {Row, NewState} ->
-            case Callback(transform_row(possibly_embed_doc(NewState,Row)), AccIn) of
+            case Callback(transform_row(Row), AccIn) of
             {stop, Acc} ->
                 {stop, NewState#collector{user_acc=Acc, limit=Limit-1}};
             {ok, Acc} ->
@@ -155,55 +156,10 @@ maybe_send_row(State) ->
         end
     end.
 
-%% if include_docs=true is used when keys and
-%% the values contain "_id" then use the "_id"s
-%% to retrieve documents and embed in result
-possibly_embed_doc(_State,
-              #view_row{id=reduced}=Row) ->
-    Row;
-possibly_embed_doc(_State,
-                   #view_row{value=undefined}=Row) ->
-    Row;
-possibly_embed_doc(#collector{db_name=DbName, query_args=Args},
-              #view_row{key=_Key, id=_Id, value=Value, doc=_Doc}=Row) ->
-    #view_query_args{include_docs=IncludeDocs} = Args,
-    case IncludeDocs andalso is_tuple(Value) of
-    true ->
-        {Props} = Value,
-        Rev0 = couch_util:get_value(<<"_rev">>, Props),
-        case couch_util:get_value(<<"_id">>,Props) of
-        undefined -> Row;
-        IncId ->
-            % use separate process to call fabric:open_doc
-            % to not interfere with current call
-            {Pid, Ref} = spawn_monitor(fun() ->
-                exit(
-                case Rev0 of
-                undefined ->
-                    case fabric:open_doc(DbName, IncId, []) of
-                    {ok, NewDoc} ->
-                        Row#view_row{doc=couch_doc:to_json_obj(NewDoc,[])};
-                    {not_found, _} ->
-                        Row#view_row{doc=null}
-                    end;
-                Rev0 ->
-                    Rev = couch_doc:parse_rev(Rev0),
-                    case fabric:open_revs(DbName, IncId, [Rev], []) of
-                    {ok, [{ok, NewDoc}]} ->
-                        Row#view_row{doc=couch_doc:to_json_obj(NewDoc,[])};
-                    {ok, [{{not_found, _}, Rev}]} ->
-                        Row#view_row{doc=null}
-                    end
-                end) end),
-            receive {'DOWN',Ref,process,Pid, Resp} ->
-                        Resp
-            end
-        end;
-        _ -> Row
-    end.
-
 
 keydict(nil) ->
+    undefined;
+keydict(undefined) ->
     undefined;
 keydict(Keys) ->
     {Dict,_} = lists:foldl(fun(K, {D,I}) -> {dict:store(K,I,D), I+1} end,
@@ -216,7 +172,7 @@ get_next_row(#collector{rows = []}) ->
     throw(complete);
 get_next_row(#collector{reducer = RedSrc} = St) when RedSrc =/= undefined ->
     #collector{
-        query_args = #view_query_args{direction=Dir},
+        query_args = #mrargs{direction=Dir},
         keys = Keys,
         rows = RowDict,
         os_proc = Proc,
@@ -246,12 +202,12 @@ get_next_row(State) ->
     NewState = maybe_resume_worker(Worker, State#collector{counters=Counters1}),
     {Row, NewState#collector{rows = Rest}}.
 
-find_next_key(nil, Dir, RowDict) ->
+find_next_key(undefined, Dir, RowDict) ->
     case lists:sort(sort_fun(Dir), dict:fetch_keys(RowDict)) of
     [] ->
         throw(complete);
     [Key|_] ->
-        {Key, nil}
+        {Key, undefined}
     end;
 find_next_key([], _, _) ->
     throw(complete);
@@ -259,15 +215,15 @@ find_next_key([Key|Rest], _, _) ->
     {Key, Rest}.
 
 transform_row(#view_row{key=Key, id=reduced, value=Value}) ->
-    {row, {[{key,Key}, {value,Value}]}};
+    {row, [{key,Key}, {value,Value}]};
 transform_row(#view_row{key=Key, id=undefined}) ->
-    {row, {[{key,Key}, {error,not_found}]}};
+    {row, [{key,Key}, {error,not_found}]};
 transform_row(#view_row{key=Key, id=Id, value=Value, doc=undefined}) ->
-    {row, {[{id,Id}, {key,Key}, {value,Value}]}};
+    {row, [{id,Id}, {key,Key}, {value,Value}]};
 transform_row(#view_row{key=Key, id=Id, value=Value, doc={error,Reason}}) ->
-    {row, {[{id,Id}, {key,Key}, {value,Value}, {error,Reason}]}};
+    {row, [{id,Id}, {key,Key}, {value,Value}, {error,Reason}]};
 transform_row(#view_row{key=Key, id=Id, value=Value, doc=Doc}) ->
-    {row, {[{id,Id}, {key,Key}, {value,Value}, {doc,Doc}]}}.
+    {row, [{id,Id}, {key,Key}, {value,Value}, {doc,Doc}]}.
 
 
 sort_fun(fwd) ->
@@ -292,9 +248,9 @@ extract_view(Pid, ViewName, [View|Rest], ViewType) ->
     end.
 
 view_names(View, Type) when Type == red_map; Type == reduce ->
-    [Name || {Name, _} <- View#view.reduce_funs];
+    [Name || {Name, _} <- View#mrview.reduce_funs];
 view_names(View, map) ->
-    View#view.map_names.
+    View#mrview.map_names.
 
 index_of(X, List) ->
     index_of(X, List, 1).
@@ -306,10 +262,10 @@ index_of(X, [X|_Rest], I) ->
 index_of(X, [_|Rest], I) ->
     index_of(X, Rest, I+1).
 
-get_shards(DbName, #view_query_args{stale=Stale})
+get_shards(DbName, #mrargs{stale=Stale})
   when Stale == ok orelse Stale == update_after ->
     mem3:ushards(DbName);
-get_shards(DbName, #view_query_args{stale=false}) ->
+get_shards(DbName, #mrargs{stale=false}) ->
     mem3:shards(DbName).
 
 % unit test
