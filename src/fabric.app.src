@@ -2,5 +2,6 @@
     {description, "Routing and proxying layer for CouchDB cluster"},
     {vsn, git},
     {registered, []},
-    {applications, [kernel, stdlib, couch, rexi, mem3, twig]}
+    {applications, [kernel, stdlib, couch, couch_mrview, couch_index,
+        rexi, mem3, twig]}
 ]}.
