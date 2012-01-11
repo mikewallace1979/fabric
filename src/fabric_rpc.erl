@@ -70,8 +70,9 @@ map_view(DbName, DDoc, ViewName, QueryArgs) ->
         extra = Extra
     } = QueryArgs,
     set_io_priority(DbName, Extra),
+    QueryArgs1 = couch_mrview_util:validate_args(QueryArgs),
     {ok, {_Type, View}, _Sig, _Args} = couch_mrview_util:get_view(
-            Db, DDoc, ViewName, QueryArgs),
+            Db, DDoc, ViewName, QueryArgs1),
     {ok, Total} = couch_mrview_util:get_row_count(View),
     Acc0 = #mracc{
         db = Db,
@@ -80,9 +81,9 @@ map_view(DbName, DDoc, ViewName, QueryArgs) ->
         total_rows = Total,
         reduce_fun = fun couch_mrview_util:reduce_to_count/1,
         update_seq = View#mrview.update_seq,
-        args = QueryArgs
+        args = QueryArgs1
     },
-    OptList = couch_mrview_util:key_opts(QueryArgs),
+    OptList = couch_mrview_util:key_opts(QueryArgs1),
     {Reds, Acc} = lists:foldl(fun(Opts, AccIn) ->
         {ok, R, A} = couch_mrview_util:fold(View, fun map_fold/3, AccIn,
             Opts),
