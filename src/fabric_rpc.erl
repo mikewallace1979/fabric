@@ -102,9 +102,10 @@ reduce_view(DbName, DDoc, ViewName, QueryArgs) ->
         extra = Extra
     } = QueryArgs,
     set_io_priority(DbName, Extra),
+    QueryArgs1 = couch_mrview_util:validate_args(QueryArgs),
     GroupFun = group_rows_fun(GroupLevel),
     {ok, {_Type, {_Nth, _Lang, View}=RedView}, _Sig, _Args} =
-            couch_mrview_util:get_view(Db, DDoc, ViewName, QueryArgs),
+            couch_mrview_util:get_view(Db, DDoc, ViewName, QueryArgs1),
     Acc = #mracc{
         db = Db,
         total_rows = null,
@@ -112,9 +113,9 @@ reduce_view(DbName, DDoc, ViewName, QueryArgs) ->
         limit = Limit,
         skip = Skip,
         update_seq = View#mrview.update_seq,
-        args = QueryArgs
+        args = QueryArgs1
     },
-    OptList = couch_mrview_util:key_opts(QueryArgs, [{key_group_fun, GroupFun}]),
+    OptList = couch_mrview_util:key_opts(QueryArgs1, [{key_group_fun, GroupFun}]),
     Acc2 = lists:foldl(fun(Opts, Acc0) ->
         {ok, Acc1} =
             couch_mrview_util:fold_reduce(RedView, fun red_fold/3, Acc0, Opts),
