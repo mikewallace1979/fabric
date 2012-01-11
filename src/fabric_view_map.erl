@@ -70,7 +70,7 @@ handle_message({rexi_EXIT, Reason}, Worker, State) ->
         {error, Resp}
     end;
 
-handle_message({meta, Meta}, {Worker, From}, State) ->
+handle_message({meta, Meta0}, {Worker, From}, State) ->
     #collector{
         callback = Callback,
         counters = Counters0,
@@ -87,8 +87,8 @@ handle_message({meta, Meta}, {Worker, From}, State) ->
         gen_server:reply(From, ok),
         Counters1 = fabric_dict:update_counter(Worker, 1, Counters0),
         Counters2 = fabric_view:remove_overlapping_shards(Worker, Counters1),
-        Total = Total0 + couch_util:get_value(total, Meta),
-        Offset = Offset0 + couch_util:get_value(offset, Meta),
+        Total = Total0 + couch_util:get_value(total, Meta0),
+        Offset = Offset0 + couch_util:get_value(offset, Meta0),
         case fabric_dict:any(0, Counters2) of
         true ->
             {ok, State#collector{
@@ -98,6 +98,8 @@ handle_message({meta, Meta}, {Worker, From}, State) ->
             }};
         false ->
             FinalOffset = erlang:min(Total, Offset+State#collector.skip),
+            Meta = lists:ukeymerge(1, [{offset, FinalOffset}, {total, Total}],
+                    lists:ukeysort(1, Meta0)),
             {Go, Acc} = Callback({meta, Meta}, AccIn),
             {Go, State#collector{
                 counters = fabric_dict:decrement_all(Counters2),
