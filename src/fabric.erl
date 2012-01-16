@@ -300,9 +300,9 @@ get_view_group_info(DbName, DesignId) ->
 -spec design_docs(dbname()) -> {ok, [json_obj()]}.
 design_docs(DbName) ->
     QueryArgs = #mrargs{start_key = <<"_design/">>, include_docs=true},
-    Callback = fun({_, _}, []) ->
+    Callback = fun({meta, _}, []) ->
         {ok, []};
-    ({row, {Props}}, Acc) ->
+    ({row, Props}, Acc) ->
         case couch_util:get_value(id, Props) of
         <<"_design/", _/binary>> ->
             {ok, [couch_util:get_value(doc, Props) | Acc]};
