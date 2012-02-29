@@ -310,7 +310,9 @@ design_docs(DbName) ->
             {stop, Acc}
         end;
     (complete, Acc) ->
-        {ok, lists:reverse(Acc)}
+        {ok, lists:reverse(Acc)};
+    ({error, Reason}, _Acc) ->
+        {error, Reason}
     end,
     fabric:all_docs(dbname(DbName), Callback, [], QueryArgs).
 
